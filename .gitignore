@@ -1,0 +1,15 @@
+# Generated state retained when this single worktree switches from
+# sky/vX.Y.Z release branches to the independent main branch.
+
+/node_modules/
+/.turbo/
+
+/.opencode/node_modules/
+/.opencode/package.json
+/.opencode/package-lock.json
+/.opencode/bun.lock
+
+/packages/**/node_modules/
+/packages/**/.turbo/
+/packages/**/dist/
+/packages/**/*.tsbuildinfo
