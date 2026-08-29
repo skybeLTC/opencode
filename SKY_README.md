@@ -521,6 +521,16 @@ git tag -l 'v*' |
     tail -20
 ```
 
+`git fetch upstream` 可能讓 local strict official tags 比 `origin` 的 stable-tag archive 更新；這是正常的 repository state，直到明確執行 archive publication 為止。
+
+`sky-tools/check-release.sh` 只負責 adopted / available observation，不會把 tags push 到 `origin`。official stable tag 的 authority / archive boundary、strict tag filtering、identity audit 與 publication procedure 以：
+
+```bash
+git show main:README.md
+```
+
+中的 repository-level tag policy 為準。
+
 不要在 stable branch 執行：
 
 ```bash
@@ -611,8 +621,42 @@ tag 不存在就停止，不要自行建立官方同名 tag。
 明確決定採用後，才建立新 branch：
 
 ```bash
-git switch -c sky/v1.18.25 v1.18.25
+git switch --no-track -c sky/v1.18.25 v1.18.25
 ```
+
+這裡刻意使用 `--no-track`。
+
+repository 的 upstream fetch policy 包含：
+
+```text
+refs/tags/v*:refs/tags/v*
+```
+
+因此 local official tag 與 upstream tag ref 有明確 fetch mapping。Git 在從這類 tag 建 branch 時可能自動建立：
+
+```text
+branch.sky/vX.Y.Z.remote = upstream
+branch.sky/vX.Y.Z.merge  = refs/tags/vX.Y.Z
+```
+
+這不是 release maintenance branch 要的 tracking 關係。新的 `sky/vX.Y.Z` 在 publish 前應先沒有 upstream；第一次：
+
+```bash
+git push -u origin sky/vX.Y.Z
+```
+
+之後才應 tracking 對應的 `origin/sky/vX.Y.Z`。
+
+建立 branch 後先確認：
+
+```bash
+git for-each-ref \
+    --format='%(upstream:short)' \
+    refs/heads/sky/v1.18.25 |
+    cat
+```
+
+預期沒有輸出。
 
 此時 branch 只有 target official release source。**先不要搬舊版 `SKY_README.md` 或 `sky-tools/`。**
 
@@ -1083,13 +1127,21 @@ rebuild / publish 新 release
 
 ### Rule 4 — 採用新版時建立新 branch
 
-建立：
+從 official tag 建立：
 
-```text
-sky/vNEW_VERSION
+```bash
+git switch --no-track -c sky/vNEW_VERSION vNEW_VERSION
 ```
 
 不要覆寫舊 release branch。
+
+publish 前 branch 不應 tracking upstream tag；第一次 publish 後才用：
+
+```bash
+git push -u origin sky/vNEW_VERSION
+```
+
+建立正確的 `origin/sky/vNEW_VERSION` tracking。
 
 ### Rule 5 — target tag 定義 build / validation contract
 
@@ -1201,6 +1253,14 @@ git tag -l 'v*' |
 
 看到新版不代表自動採用。
 
+若要確認 / 同步 `origin` 的 official stable tag archive，依：
+
+```bash
+git show main:README.md
+```
+
+中的 Section 4.2 先做 strict tag set / identity audit；不要直接 `git push --tags`。
+
 看官方 dev：
 
 ```bash
@@ -1219,7 +1279,7 @@ git show main:sky-tools/setup-local-repo.sh
 ```bash
 git fetch upstream
 git show-ref --verify refs/tags/v1.18.25
-git switch -c sky/v1.18.25 v1.18.25
+git switch --no-track -c sky/v1.18.25 v1.18.25
 ```
 
 先依 Section 10.2 review target upstream build / validation contract；完成後才 restore Sky maintenance files、適配 tooling、migration product patches。
