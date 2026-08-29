@@ -293,7 +293,83 @@ Sky 可以繼續維護目前 adopted release，也可以明確決定跳過一個
 
 真正採用新版時，才依目前 release branch 的 `SKY_README.md` 執行 release adoption / migration。
 
-### 4.2 Single-worktree branch-switch hygiene
+### 4.2 Official stable tag archive
+
+`git fetch upstream` 只會把 upstream 的 official tag refs 更新到 local repository，不會把 local tags 自動 publish 到 `origin`。
+
+因此要區分三個角色：
+
+```text
+upstream strict vX.Y.Z tags
+    ↓ authoritative source
+
+local strict vX.Y.Z tags
+    ↓ observation / release-base refs
+
+origin strict vX.Y.Z tags
+    ↓ archival copy in the Sky fork
+```
+
+`origin` 的 stable-tag archive 可能暫時落後於 local / upstream。這不改變：
+
+- `Latest available`：仍以 `git fetch upstream` 後的 local strict official tags 判定。
+- `Latest adopted`：仍以 published `origin/sky/vX.Y.Z` branches 判定。
+
+`sky-tools/check-release.sh` 與 `sky-tools/setup-local-repo.sh` 都不負責把 tags publish 到 `origin`。tag publication 是明確、獨立的 repository mutation，不應偷偷附帶在 observation / bootstrap workflow 中。
+
+只 archive strict stable tags：
+
+```text
+^v[0-9]+\.[0-9]+\.[0-9]+$
+```
+
+不要因為 upstream fetch refspec 是 `v*`，就把例如：
+
+```text
+vscode-v0.0.x
+```
+
+這類 non-strict tags 一起 push 到 `origin`。
+
+publish 缺少的 official stable tags 前，至少確認：
+
+1. upstream / local / origin strict stable tag set。
+2. 每個待 publish tag 的 local commit identity 與 upstream 完全相同。
+3. `origin` 尚不存在同名 tag。
+4. 不覆寫、改寫或 force-update 既有 origin tag。
+
+需要比較 set 時，`comm` 的輸入必須使用相同的 lexical sort，例如：
+
+```bash
+LC_ALL=C sort -u
+```
+
+不要先用 `sort -V` 再直接交給 `comm`；version sort 與 `comm` 要求的 lexical ordering 不相同。需要顯示人類易讀的版本順序時，可以在 `comm` 完成後再 `sort -V`。
+
+publish 時只明確指定已驗證、缺少的 strict stable tags。多個 tags 一起 publish 時優先使用 atomic push：
+
+```bash
+git push \
+    --atomic \
+    origin \
+    refs/tags/vX.Y.A:refs/tags/vX.Y.A \
+    refs/tags/vX.Y.B:refs/tags/vX.Y.B
+```
+
+不要使用：
+
+```bash
+git push --tags
+git push --force --tags
+```
+
+也不要 force-update `origin` 上既有的 official stable tag。
+
+publish 後重新比對 upstream / local / origin tag identities 與 strict stable tag set。只有 identity 與 set 都符合預期，才算 archive synchronization 完成。
+
+若 upstream 改寫已存在的同名 `v*` tag，因 `remote.upstream.fetch` 的 tag refspec 沒有前導 `+`，正常 fetch 應停止而不是強制覆寫 local tag。此時不要繞過保護，先 review upstream tag rewrite。
+
+### 4.3 Single-worktree branch-switch hygiene
 
 本 repository 預設使用單一 worktree：
 
@@ -719,7 +795,9 @@ origin/dev
 
 local release base tags 由 `upstream` fetch。
 
-Sky fork 可保存正式 `vX.Y.Z` tags作為 archival/base reference，但不要把 `origin` 當 release tag authority。
+Sky fork 保存 strict official `vX.Y.Z` tags 作為 archival/base reference，但 `origin` 只是 archive，不是 release tag authority。
+
+新的 official stable tag 被 fetch 到 local 後，不會自動 publish 到 `origin`。需要同步 archive 時，依 Section 4.2 先驗證 exact tag set / identity，再只 push 明確缺少的 strict stable tags；不要使用 `git push --tags`，也不要 force-update 既有 tag。
 
 ### Rule 6 — 不把 local maintenance push 到 upstream
 
