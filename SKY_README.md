@@ -1090,6 +1090,148 @@ git log \
 
 後續功能修改使用獨立 commits。
 
+### 16.1 Current Product Patch: Provider Inheritance
+
+目前 release branch 維護一個 provider-inheritance product patch。它的目的不是保存特定 machine 的 provider inventory，而是提供一個通用機制，讓 **config-only provider ID** 可以重用 built-in provider 的 catalog 與 provider-specific behavior，同時保持自己的 runtime / auth identity。
+
+核心 identity boundary：
+
+```text
+provider.id
+└── config / runtime / auth namespace
+
+provider.baseProviderID
+└── inherited catalog / provider behavior identity
+```
+
+兩者不能混為同一個 namespace。
+
+Base provider 的推導規則：
+
+1. 如果 config provider ID 本身已存在於 built-in catalog，不建立 inheritance。
+2. `npm` 為 canonical `@ai-sdk/<provider>` 時，若 catalog 中存在同名 provider 且 `npm` 完全一致，優先繼承該 provider。
+3. 其他 package 只有在 `npm` **唯一對應**一個 built-in catalog provider 時才允許 inheritance。
+4. 無法唯一、確定地推導 base provider 時，不猜測、不 inheritance。
+
+目前這顆 patch 沿著需要 alias-safe 的主要 provider paths 傳遞 base identity：
+
+```text
+built-in provider catalog / model metadata
+provider model hooks
+plugin auth loaders
+custom provider loaders
+selected provider-specific transforms
+selected LLM runtime behavior
+```
+
+這是 **current patch coverage**，不是「所有 source 內只要比較 provider ID 就會自動 inheritance」的全域保證。OpenCode 未來仍可能新增或保留 raw provider-ID branch；migration / source edit 時必須重新 audit 與目前功能相關的 provider-specific checks，不能只因 `baseProviderID` 已存在就假設所有 path 都 alias-safe。
+
+Alias 自己仍負責：
+
+```text
+provider ID
+credential / auth storage key
+config options
+model sparse overrides / additions
+whitelist / blacklist
+```
+
+因此：
+
+- inherited models 會重新綁定到 alias provider ID，同時保留 `baseProviderID` 供 provider-specific logic 判斷；
+- config `models` 應優先作為 sparse override / addition，而不是複製完整 built-in model metadata；
+- `whitelist` / `blacklist` 在 inheritance 後限制 alias 最終暴露的 model set；
+- config options 可以覆寫 inherited provider options；
+- 若 explicit model 改用與 inherited provider 不同的 SDK package，不應保留錯誤的 base-provider behavior；
+- auth lookup、OAuth/API credential 與 refresh persistence 必須以 alias provider ID 為 namespace，不可 fallback 或寫回 base provider credential；
+- plugin 需要持久化更新 auth state 時，必須使用實際 runtime provider ID，而不是 hard-code plugin 的 built-in provider ID。
+
+Plugin auth login discovery 也沿用 inherited base provider。若 alias 繼承的 base provider 提供 interactive / OAuth login hook，CLI 可以在 alias ID 下暴露同一個 login flow。
+
+這個 login flow **不是 read-only**：
+
+- 完成 login 後，新的 credential 會寫回該 alias 自己的 auth namespace；
+- 不會 fallback、覆寫或共用 base provider 的 credential；
+- 但如果 alias 原本已保存另一種 credential type，例如 API credential，完成 OAuth login 可能會以新的 OAuth credential 取代該 alias 原本的 credential entry；
+- 因此在 inherited alias 上執行 plugin auth login 前，必須先確認「替換該 alias 現有 credential type」是刻意操作，而不是單純想查看或測試 login capability。
+
+這是目前 generic auth inheritance 的 operator-facing behavior。若未來需要讓「catalog / provider behavior inheritance」與「interactive auth login inheritance」可以獨立控制，應新增明確的 auth-inheritance policy，而不是依賴 alias naming convention 或 machine-specific 特判。
+
+Implementation entry point：
+
+```text
+packages/opencode/src/provider/inheritance.ts
+```
+
+實際 behavior 會跨 provider construction、auth、CLI login、plugin hooks、transforms 與 LLM runtime。Migration 時應以該 product patch 的 commit diff 與 target release source 為完整 review inventory，不要把目前 touched-file list 當成 future release 的固定 allowlist；也要搜尋 target source 中與 base provider 有關的 raw `providerID` / `provider.id` / provider-name checks，逐項判斷是否需要改用 effective base identity、是否必須保留原本 exact / prefix / substring matching semantics，或是否刻意只適用 built-in provider。
+
+Public source / documentation 只描述 generic mechanism 與 maintenance contract。Machine-specific provider alias、model inventory、endpoint 與 credential 不屬於這個 public product patch。
+
+#### Migration / removal decision
+
+採用新的 official release 時，除了 Section 11 的一般 patch review，這顆 patch 必須另外確認 upstream 是否已提供等價能力：
+
+```text
+config-only provider inheritance / aliasing
+catalog and model metadata inheritance
+provider/plugin behavior inheritance
+independent alias auth namespace
+alias-safe credential refresh persistence
+required provider-specific runtime / transform behavior
+raw provider-ID checks reviewed for alias compatibility without narrowing upstream semantics
+```
+
+判斷：
+
+```text
+DROP
+└── upstream 已完整提供等價 contract
+
+MODIFY
+└── upstream 只提供部分能力，或 internal provider / plugin contract 已改變
+
+KEEP
+└── target release 仍缺少此能力，且 patch 經 target source review 後仍相容
+
+NEEDS_REVIEW
+└── 無法從 target source / behavior 確認
+```
+
+不要只因 cherry-pick 無 conflict 或 typecheck 成功就判定可直接 KEEP。
+
+#### Functional validation
+
+除 Section 13 baseline 外，修改或 migration 此 patch 時至少驗證：
+
+```text
+unfiltered alias
+└── inherited model inventory 符合 base provider
+
+restricted alias
+└── whitelist / blacklist 正確限制 inherited catalog
+
+runtime routing
+├── base provider path 可用
+├── inherited alias path 可用
+└── API / custom endpoint override 仍使用 alias 自己的 transport/config
+
+credential isolation
+├── alias credential 不依賴 base credential
+└── auth refresh / persistence 寫回 alias namespace
+
+auth login discovery
+├── inherited login flow 以 alias ID 暴露
+├── successful login 只寫回 alias credential namespace
+└── 若 credential type 會被替換，該替換必須是刻意操作
+
+regression
+└── unrelated built-in providers / plugin paths 沒有因 base identity 判斷而改變行為
+```
+
+若 provider 使用可 refresh 的 auth，credential-isolation smoke test 應在不輸出 credential 本身的前提下，暫時使 base credential 不可用並確認 alias 仍可獨立運作；測試後恢復原 auth state。
+
+驗證紀錄只保留 durable contract；某次 migration 的 exact commands、PASS output 與具體 provider/model smoke results 放在該 logical change 的 commit message，不在本節累積 chronological transcript。
+
 ---
 
 ## 17. AI Agent Rules
@@ -1218,6 +1360,12 @@ documented commands
 ```
 
 重現。
+
+### Rule 12 — Provider inheritance 依 Section 16.1
+
+修改、review 或 migration provider-inheritance product patch 時，先讀 Section 16.1 的 identity boundary、migration / removal decision 與 functional validation。
+
+不要把 machine-specific provider alias、model inventory、endpoint 或 credential 寫進 public product source / documentation。
 
 ---
 

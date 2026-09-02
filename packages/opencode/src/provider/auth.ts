@@ -5,6 +5,9 @@ import { Auth } from "@/auth"
 import { InstanceState } from "@/effect/instance-state"
 import { optional } from "@opencode-ai/core/schema"
 import { Plugin } from "../plugin"
+import { Config } from "@/config/config"
+import { ModelsDev } from "@opencode-ai/core/models-dev"
+import * as ProviderInheritance from "./inheritance"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { Array as Arr, Effect, Layer, Record, Result, Context, Schema } from "effect"
 
@@ -106,22 +109,37 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Pr
 
 export const use = serviceUse(Service)
 
-const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> = Layer.effect(
+const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service | Config.Service | ModelsDev.Service> = Layer.effect(
   Service,
   Effect.gen(function* () {
     const auth = yield* Auth.Service
     const plugin = yield* Plugin.Service
+    const config = yield* Config.Service
+    const modelsDev = yield* ModelsDev.Service
     const state = yield* InstanceState.make<State>(
       Effect.fn("ProviderAuth.state")(function* () {
         const plugins = yield* plugin.list()
-        return {
-          hooks: Record.fromEntries(
-            Arr.filterMap(plugins, (x) =>
-              x.auth?.provider !== undefined
-                ? Result.succeed([ProviderV2.ID.make(x.auth.provider), x.auth] as const)
-                : Result.failVoid,
-            ),
+        const cfg = yield* config.get()
+        const catalog = yield* modelsDev.get()
+        const hooks = Record.fromEntries(
+          Arr.filterMap(plugins, (x) =>
+            x.auth?.provider !== undefined
+              ? Result.succeed([ProviderV2.ID.make(x.auth.provider), x.auth] as const)
+              : Result.failVoid,
           ),
+        )
+
+        for (const [id, provider] of Object.entries(cfg.provider ?? {})) {
+          const providerID = ProviderV2.ID.make(id)
+          if (hooks[providerID]) continue
+          const base = ProviderInheritance.inferBaseProviderID({ providerID, provider, catalog })
+          if (!base) continue
+          const inherited = hooks[ProviderV2.ID.make(base)]
+          if (inherited) hooks[providerID] = inherited
+        }
+
+        return {
+          hooks,
           pending: new Map<ProviderV2.ID, AuthOAuthResult>(),
         }
       }),
@@ -224,6 +242,6 @@ const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> = Layer.
   }),
 )
 
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [Auth.node, Plugin.node] })
+export const node = LayerNode.make({ service: Service, layer: layer, deps: [Auth.node, Plugin.node, Config.node, ModelsDev.node] })
 
 export * as ProviderAuth from "./auth"

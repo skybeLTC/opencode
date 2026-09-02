@@ -5,6 +5,7 @@ import { iife } from "@/util/iife"
 import { setTimeout as sleep } from "node:timers/promises"
 import { CopilotModels } from "./models"
 import { MessageV2 } from "@/session/message-v2"
+import * as ProviderInheritance from "@/provider/inheritance"
 
 const CLIENT_ID = "Ov23li8tweQw6odWQebz"
 const API_VERSION = "2026-06-01"
@@ -338,7 +339,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
       ],
     },
     "chat.params": async (incoming, output) => {
-      if (!incoming.model.providerID.includes("github-copilot")) return
+      if (!(ProviderInheritance.baseProviderID(incoming.model) ?? incoming.model.providerID).includes("github-copilot")) return
 
       // Match github copilot cli, omit maxOutputTokens for gpt models
       if (incoming.model.api.id.includes("gpt")) {
@@ -353,12 +354,12 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
       }
     },
     "experimental.provider.small_model": async (incoming, output) => {
-      if (incoming.provider.id !== "github-copilot") return
+      if (!ProviderInheritance.isProvider(incoming.provider, "github-copilot")) return
       // GitHub exposes utility models for title generation without including them in the picker.
       output.model = UTILITY_MODELS.map((id) => models[id]).find((model) => model !== undefined)
     },
     "chat.headers": async (incoming, output) => {
-      if (!incoming.model.providerID.includes("github-copilot")) return
+      if (!(ProviderInheritance.baseProviderID(incoming.model) ?? incoming.model.providerID).includes("github-copilot")) return
 
       output.headers["X-GitHub-Api-Version"] = API_VERSION
       if (incoming.agent === "title") {

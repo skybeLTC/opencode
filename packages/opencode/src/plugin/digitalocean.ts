@@ -250,7 +250,7 @@ export async function DigitalOceanAuthPlugin(input: PluginInput): Promise<Hooks>
             }
             await input.client.auth
               .set({
-                path: { id: "digitalocean" },
+                path: { id: provider.id },
                 body: { type: "api", key: ctx.auth.key, metadata: updated },
               })
               .catch(() => {})

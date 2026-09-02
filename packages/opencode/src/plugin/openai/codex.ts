@@ -6,6 +6,7 @@ import { setTimeout as sleep } from "node:timers/promises"
 import { createServer } from "http"
 import { OpenAIWebSocketPool } from "./ws-pool"
 import { OauthCallbackPage } from "@opencode-ai/core/oauth/page"
+import * as ProviderInheritance from "@/provider/inheritance"
 
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 const ISSUER = "https://auth.openai.com"
@@ -275,6 +276,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
   const codexApiEndpoint = options.codexApiEndpoint ?? CODEX_API_ENDPOINT
   let websocketFetchInstalled = false
   const websocketFetches: Array<ReturnType<typeof OpenAIWebSocketPool.createWebSocketFetch>> = []
+  const oauthProviderIDs = new Set<string>()
 
   return {
     async dispose() {
@@ -324,8 +326,11 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
     },
     auth: {
       provider: "openai",
-      async loader(getAuth) {
+      async loader(getAuth, provider) {
+        const providerID = provider.id
         const auth = await getAuth()
+        if (auth.type === "oauth") oauthProviderIDs.add(providerID)
+        else oauthProviderIDs.delete(providerID)
         const websocketFetch = options.experimentalWebSockets
           ? OpenAIWebSocketPool.createWebSocketFetch({ httpFetch: fetch })
           : undefined
@@ -358,8 +363,11 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
             }
 
             const currentAuth = await getAuth()
-            if (currentAuth.type !== "oauth")
+            if (currentAuth.type !== "oauth") {
+              oauthProviderIDs.delete(providerID)
               return websocketFetch ? websocketFetch(requestInput, init) : fetch(requestInput, init)
+            }
+            oauthProviderIDs.add(providerID)
 
             const authWithAccount = currentAuth as typeof currentAuth & { accountId?: string }
 
@@ -369,7 +377,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
                   .then(async (tokens) => {
                     const accountId = extractAccountId(tokens) || authWithAccount.accountId
                     await input.client.auth.set({
-                      path: { id: "openai" },
+                      path: { id: providerID },
                       body: {
                         type: "oauth",
                         refresh: tokens.refresh_token,
@@ -554,7 +562,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
       ],
     },
     "chat.headers": async (input, output) => {
-      if (input.model.providerID !== "openai") return
+      if (!oauthProviderIDs.has(input.model.providerID) || !ProviderInheritance.isProvider(input.model, "openai")) return
       output.headers.originator = "opencode"
       output.headers["User-Agent"] = `opencode/${InstallationVersion} (${os.platform()} ${os.release()}; ${os.arch()})`
       output.headers["session-id"] = input.sessionID
@@ -564,7 +572,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
       if (websocketFetchInstalled && input.agent === "title") output.headers[OpenAIWebSocketPool.TITLE_HEADER] = "true"
     },
     "chat.params": async (input, output) => {
-      if (input.model.providerID !== "openai") return
+      if (!oauthProviderIDs.has(input.model.providerID) || !ProviderInheritance.isProvider(input.model, "openai")) return
       // Match codex cli
       output.maxOutputTokens = undefined
     },

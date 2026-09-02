@@ -31,6 +31,7 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { ModelStatus } from "./model-status"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderError } from "./error"
+import * as ProviderInheritance from "./inheritance"
 
 const OPENAI_HEADER_TIMEOUT_DEFAULT = 300_000
 
@@ -1048,6 +1049,7 @@ const ProviderLimit = Schema.Struct({
 export const Model = Schema.Struct({
   id: ModelV2.ID,
   providerID: ProviderV2.ID,
+  baseProviderID: optional(ProviderV2.ID),
   api: ProviderApiInfo,
   name: Schema.String,
   family: optional(Schema.String),
@@ -1064,6 +1066,7 @@ export type Model = Types.DeepMutable<Schema.Schema.Type<typeof Model>>
 
 export const Info = Schema.Struct({
   id: ProviderV2.ID,
+  baseProviderID: optional(ProviderV2.ID),
   name: Schema.String,
   source: Schema.Literals(["env", "config", "custom", "api"]),
   env: Schema.Array(Schema.String),
@@ -1421,31 +1424,72 @@ const layer = Layer.effect(
           return true
         }
 
+        // A config-only provider can inherit a built-in provider catalog from
+        // its SDK package. Canonical @ai-sdk/<provider> packages prefer the
+        // matching built-in provider ID; other packages fall back to unique
+        // npm matching. Config models remain sparse overrides/additions, and
+        // whitelist/blacklist filtering is applied to the inherited result.
+        for (const [id, provider] of configProviders) {
+          const providerID = ProviderV2.ID.make(id)
+          const base = ProviderInheritance.inferBaseProviderID({
+            providerID,
+            provider,
+            catalog: modelsDev,
+          })
+          if (!base) continue
+
+          const baseProviderID = ProviderV2.ID.make(base)
+          const source = database[baseProviderID]
+          if (!source) continue
+
+          const inherited = toPublicInfo(source)
+          inherited.id = providerID
+          inherited.baseProviderID = baseProviderID
+          inherited.name = provider.name ?? id
+          inherited.source = "config"
+          inherited.env = provider.env ?? []
+          delete inherited.key
+          inherited.options = mergeDeep(source.options ?? {}, provider.options ?? {})
+          inherited.models = mapValues(inherited.models, (model) => ({
+            ...model,
+            providerID,
+            baseProviderID,
+          }))
+          database[providerID] = inherited
+        }
+
+        function providersFor(baseProviderID: ProviderV2.ID): Info[] {
+          return Object.values(database).filter(
+            (provider) => ProviderInheritance.baseProviderID(provider) === baseProviderID,
+          )
+        }
+
         for (const hook of plugins) {
           const p = hook.provider
           const models = p?.models
           if (!p || !models) continue
 
-          const providerID = ProviderV2.ID.make(p.id)
-          if (disabled.has(providerID)) continue
+          const baseProviderID = ProviderV2.ID.make(p.id)
+          for (const provider of providersFor(baseProviderID)) {
+            const providerID = provider.id
+            if (!isProviderAllowed(providerID)) continue
+            const pluginAuth = yield* auth.get(providerID).pipe(Effect.orDie)
 
-          const provider = database[providerID]
-          if (!provider) continue
-          const pluginAuth = yield* auth.get(providerID).pipe(Effect.orDie)
-
-          provider.models = yield* Effect.promise(async () => {
-            const next = await models(toPublicInfo(provider), { auth: pluginAuth })
-            return Object.fromEntries(
-              Object.entries(next).map(([id, model]) => [
-                id,
-                {
-                  ...model,
-                  id: ModelV2.ID.make(id),
-                  providerID,
-                },
-              ]),
-            )
-          })
+            provider.models = yield* Effect.promise(async () => {
+              const next = await models(toPublicInfo(provider), { auth: pluginAuth })
+              return Object.fromEntries(
+                Object.entries(next).map(([id, model]) => [
+                  id,
+                  {
+                    ...model,
+                    id: ModelV2.ID.make(id),
+                    providerID,
+                    baseProviderID: provider.baseProviderID,
+                  },
+                ]),
+              )
+            })
+          }
         }
 
         // extend database from config
@@ -1453,6 +1497,7 @@ const layer = Layer.effect(
           const existing = database[providerID]
           const parsed: Info = {
             id: ProviderV2.ID.make(providerID),
+            baseProviderID: existing?.baseProviderID,
             name: provider.name ?? existing?.name ?? providerID,
             env: provider.env ?? existing?.env ?? [],
             options: mergeDeep(existing?.options ?? {}, provider.options ?? {}),
@@ -1479,6 +1524,11 @@ const layer = Layer.effect(
             })
             const parsedModel: Model = {
               id: ModelV2.ID.make(modelID),
+              providerID: ProviderV2.ID.make(providerID),
+              baseProviderID:
+                existing?.baseProviderID && apiNpm === (provider.npm ?? existingModel?.api.npm)
+                  ? existing.baseProviderID
+                  : undefined,
               api: {
                 id: apiID,
                 npm: apiNpm,
@@ -1486,7 +1536,6 @@ const layer = Layer.effect(
               },
               status: model.status ?? existingModel?.status ?? "active",
               name,
-              providerID: ProviderV2.ID.make(providerID),
               capabilities: {
                 temperature: model.temperature ?? existingModel?.capabilities.temperature ?? false,
                 reasoning: model.reasoning ?? existingModel?.capabilities.reasoning ?? false,
@@ -1575,42 +1624,47 @@ const layer = Layer.effect(
           }
         }
 
-        // plugin auth loader - database now has entries for config providers
+        // Plugin auth and custom provider loaders are inherited by aliases.
+        // Credentials are still resolved by the alias ID, so provider behavior
+        // can be shared without sharing auth state.
         for (const plugin of plugins) {
-          if (!plugin.auth) continue
-          const providerID = ProviderV2.ID.make(plugin.auth.provider)
-          if (disabled.has(providerID)) continue
+          if (!plugin.auth?.loader) continue
+          const baseProviderID = ProviderV2.ID.make(plugin.auth.provider)
 
-          const stored = yield* auth.get(providerID).pipe(Effect.orDie)
-          if (!stored) continue
-          if (!plugin.auth.loader) continue
+          for (const data of providersFor(baseProviderID)) {
+            const providerID = data.id
+            if (!isProviderAllowed(providerID)) continue
 
-          const options = yield* Effect.promise(() =>
-            plugin.auth!.loader!(
-              () => bridge.promise(auth.get(providerID).pipe(Effect.orDie)) as any,
-              toPublicInfo(database[plugin.auth!.provider]),
-            ),
-          )
-          const opts = options ?? {}
-          const patch: Partial<Info> = providers[providerID] ? { options: opts } : { source: "custom", options: opts }
-          mergeProvider(providerID, patch)
+            const stored = yield* auth.get(providerID).pipe(Effect.orDie)
+            if (!stored) continue
+
+            const options = yield* Effect.promise(() =>
+              plugin.auth!.loader!(
+                () => bridge.promise(auth.get(providerID).pipe(Effect.orDie)) as any,
+                toPublicInfo(data),
+              ),
+            )
+            const opts = options ?? {}
+            const patch: Partial<Info> = providers[providerID] ? { options: opts } : { source: "custom", options: opts }
+            mergeProvider(providerID, patch)
+          }
         }
 
         for (const [id, fn] of Object.entries(custom(dep))) {
-          const providerID = ProviderV2.ID.make(id)
-          if (disabled.has(providerID)) continue
-          const data = database[providerID]
-          if (!data) {
-            continue
-          }
-          const result = yield* fn(data)
-          if (result && (result.autoload || providers[providerID])) {
-            if (result.getModel) modelLoaders[providerID] = result.getModel
-            if (result.vars) varsLoaders[providerID] = result.vars
-            if (result.discoverModels) discoveryLoaders[providerID] = result.discoverModels
-            const opts = result.options ?? {}
-            const patch: Partial<Info> = providers[providerID] ? { options: opts } : { source: "custom", options: opts }
-            mergeProvider(providerID, patch)
+          const baseProviderID = ProviderV2.ID.make(id)
+          for (const data of providersFor(baseProviderID)) {
+            const providerID = data.id
+            if (!isProviderAllowed(providerID)) continue
+
+            const result = yield* fn(data)
+            if (result && (result.autoload || providers[providerID])) {
+              if (result.getModel) modelLoaders[providerID] = result.getModel
+              if (result.vars) varsLoaders[providerID] = result.vars
+              if (result.discoverModels) discoveryLoaders[providerID] = result.discoverModels
+              const opts = result.options ?? {}
+              const patch: Partial<Info> = providers[providerID] ? { options: opts } : { source: "custom", options: opts }
+              mergeProvider(providerID, patch)
+            }
           }
         }
 
@@ -1707,7 +1761,7 @@ const layer = Layer.effect(
         const options = { ...provider.options }
 
         if (
-          model.providerID === "google-vertex" &&
+          ProviderInheritance.isProvider(model, "google-vertex") &&
           model.api.npm === "@ai-sdk/google-vertex/anthropic" &&
           !options.baseURL
         ) {
@@ -1718,7 +1772,7 @@ const layer = Layer.effect(
           if (baseURL) options.baseURL = baseURL
         }
 
-        if (model.providerID === "google-vertex" && !model.api.npm.includes("@ai-sdk/openai-compatible")) {
+        if (ProviderInheritance.isProvider(model, "google-vertex") && !model.api.npm.includes("@ai-sdk/openai-compatible")) {
           delete options.fetch
         }
 
@@ -1934,13 +1988,14 @@ const layer = Layer.effect(
       }
 
       // TODO: Remove these provider-specific assumptions once model syncing reliably reports available deployments.
-      if (providerID === ProviderV2.ID.azure || providerID === ProviderV2.ID.make("azure-cognitive-services")) {
+      const baseProviderID = ProviderInheritance.baseProviderID(provider) ?? providerID
+      if (baseProviderID === ProviderV2.ID.azure || baseProviderID === ProviderV2.ID.make("azure-cognitive-services")) {
         return undefined
       }
 
-      const priority = providerID.startsWith("opencode")
+      const priority = baseProviderID.startsWith("opencode")
         ? ["gpt-nano"]
-        : providerID.startsWith("github-copilot")
+        : baseProviderID.startsWith("github-copilot")
           ? ["gpt-mini", ...smallModelFamilyPriority]
           : smallModelFamilyPriority
       const models = sortBy(

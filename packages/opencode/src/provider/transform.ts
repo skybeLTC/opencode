@@ -4,6 +4,7 @@ import type { JSONSchema7 } from "@ai-sdk/provider"
 import type * as Provider from "./provider"
 import type * as ModelsDev from "@opencode-ai/core/models-dev"
 import { iife } from "@/util/iife"
+import * as ProviderInheritance from "./inheritance"
 
 type Modality = NonNullable<ModelsDev.Model["modalities"]>["input"][number]
 
@@ -253,7 +254,7 @@ function normalizeMessages(
 
   const modelID = model.api.id.toLowerCase()
   if (
-    model.providerID === "mistral" ||
+    ProviderInheritance.isProvider(model, "mistral") ||
     ["mistral", "devstral", "codestral", "pixtral", "mixtral"].some((family) => modelID.includes(family))
   ) {
     const scrub = (id: string) => {
@@ -383,8 +384,8 @@ function applyCaching(msgs: ModelMessage[], model: Provider.Model): ModelMessage
 
   for (const msg of unique([...system, ...final])) {
     const useMessageLevelOptions =
-      model.providerID === "anthropic" ||
-      model.providerID.includes("bedrock") ||
+      ProviderInheritance.isProvider(model, "anthropic") ||
+      (ProviderInheritance.baseProviderID(model) ?? model.providerID).includes("bedrock") ||
       model.api.npm === "@ai-sdk/amazon-bedrock"
     const shouldUseContentOptions = !useMessageLevelOptions && Array.isArray(msg.content) && msg.content.length > 0
 
@@ -470,8 +471,8 @@ export function message(msgs: ModelMessage[], model: Provider.Model, options: Re
     options.cacheControl !== undefined &&
     (model.api.npm === "@ai-sdk/anthropic" || model.api.npm === "@ai-sdk/google-vertex/anthropic")
   if (
-    (model.providerID === "anthropic" ||
-      model.providerID === "google-vertex-anthropic" ||
+    (ProviderInheritance.isProvider(model, "anthropic") ||
+      ProviderInheritance.isProvider(model, "google-vertex-anthropic") ||
       model.api.id.includes("anthropic") ||
       model.api.id.includes("claude") ||
       model.id.includes("anthropic") ||
@@ -553,7 +554,7 @@ export function topP(model: Provider.Model) {
   }
   if (
     ["deepseek-v4-flash-0731", "deepseek-v4-flash:0731"].some((name) => id.includes(name)) ||
-    (id.includes("deepseek-v4-flash") && (model.providerID === "deepseek" || model.providerID.startsWith("opencode")))
+    (id.includes("deepseek-v4-flash") && (ProviderInheritance.isProvider(model, "deepseek") || (ProviderInheritance.baseProviderID(model) ?? model.providerID).startsWith("opencode")))
   ) {
     return 0.95
   }
@@ -953,7 +954,7 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
       )
     case "@ai-sdk/amazon-bedrock/mantle":
     case "@ai-sdk/openai": {
-      if (model.providerID === "meta") {
+      if (ProviderInheritance.isProvider(model, "meta")) {
         return Object.fromEntries(
           OPENAI_EFFORTS.map((effort) => [
             effort,
@@ -985,7 +986,7 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
       // https://v5.ai-sdk.dev/providers/ai-sdk-providers/google-vertex#anthropic-provider
       if (adaptiveEfforts) {
         let efforts = [...adaptiveEfforts]
-        if (model.providerID === "github-copilot") {
+        if (ProviderInheritance.isProvider(model, "github-copilot")) {
           if (model.api.id.includes("opus-4.7")) {
             efforts = ["medium"]
           }
@@ -1170,7 +1171,7 @@ export function options(input: {
 
   // openai and providers using openai package should set store to false by default.
   if (
-    input.model.providerID === "openai" ||
+    ProviderInheritance.isProvider(input.model, "openai") ||
     input.model.api.npm === "@ai-sdk/openai" ||
     input.model.api.npm === "@ai-sdk/github-copilot" ||
     input.model.api.npm === "@ai-sdk/amazon-bedrock/mantle" ||
@@ -1193,14 +1194,14 @@ export function options(input: {
   }
 
   if (
-    input.model.providerID === "baseten" ||
-    (input.model.providerID === "opencode" && ["kimi-k2-thinking", "glm-4.6"].includes(input.model.api.id))
+    ProviderInheritance.isProvider(input.model, "baseten") ||
+    (ProviderInheritance.isProvider(input.model, "opencode") && ["kimi-k2-thinking", "glm-4.6"].includes(input.model.api.id))
   ) {
     result["chat_template_args"] = { enable_thinking: true }
   }
 
   if (
-    ["zai", "zhipuai"].some((id) => input.model.providerID.includes(id)) &&
+    ["zai", "zhipuai"].some((id) => (ProviderInheritance.baseProviderID(input.model) ?? input.model.providerID).includes(id)) &&
     input.model.api.npm === "@ai-sdk/openai-compatible"
   ) {
     result["thinking"] = {
@@ -1209,7 +1210,7 @@ export function options(input: {
     }
   }
 
-  if (input.model.providerID === "meta" && input.model.api.npm === "@ai-sdk/openai") {
+  if (ProviderInheritance.isProvider(input.model, "meta") && input.model.api.npm === "@ai-sdk/openai") {
     result["reasoningSummary"] = "auto"
     result["include"] = INCLUDE_ENCRYPTED_REASONING
   }
@@ -1249,7 +1250,7 @@ export function options(input: {
   // deepseek-r1, etc. never output thinking/reasoning tokens.
   // Note: kimi-k2-thinking is excluded as it returns reasoning_content by default.
   if (
-    input.model.providerID === "alibaba-cn" &&
+    ProviderInheritance.isProvider(input.model, "alibaba-cn") &&
     input.model.capabilities.reasoning &&
     input.model.api.npm === "@ai-sdk/openai-compatible" &&
     !modelId.includes("kimi-k2-thinking")
@@ -1309,12 +1310,12 @@ export function options(input: {
       input.model.api.id.includes("gpt-5.") &&
       !input.model.api.id.includes("codex") &&
       !input.model.api.id.includes("-chat") &&
-      input.model.providerID !== "azure"
+      !ProviderInheritance.isProvider(input.model, "azure")
     ) {
       result["textVerbosity"] = "low"
     }
 
-    if (input.model.providerID.startsWith("opencode") && input.providerOptions?.setCacheKey !== false) {
+    if ((ProviderInheritance.baseProviderID(input.model) ?? input.model.providerID).startsWith("opencode") && input.providerOptions?.setCacheKey !== false) {
       result["promptCacheKey"] = input.sessionID
       result["include"] = INCLUDE_ENCRYPTED_REASONING
       result["reasoningSummary"] = "auto"
@@ -1327,7 +1328,7 @@ export function options(input: {
 export function smallOptions(model: Provider.Model) {
   const small = Object.values(model.variants ?? {})[0] ?? {}
   if (
-    model.providerID === "openai" ||
+    ProviderInheritance.isProvider(model, "openai") ||
     model.api.npm === "@ai-sdk/openai" ||
     model.api.npm === "@ai-sdk/github-copilot" ||
     model.api.npm === "@ai-sdk/xai"
@@ -1335,13 +1336,13 @@ export function smallOptions(model: Provider.Model) {
     const base = { store: false }
     return mergeDeep(base, small)
   }
-  if (model.providerID === "openrouter" || model.providerID === "llmgateway") {
+  if (ProviderInheritance.isProvider(model, "openrouter") || ProviderInheritance.isProvider(model, "llmgateway")) {
     if (Object.keys(small).length === 0 && model.api.id.includes("google")) {
       return { reasoning: { enabled: false } }
     }
   }
 
-  if (model.providerID === "venice") {
+  if (ProviderInheritance.isProvider(model, "venice")) {
     if (Object.keys(small).length > 0) return small
     return { veniceParameters: { disableThinking: true } }
   }
@@ -1533,7 +1534,7 @@ export function schema(model: Provider.Model, schema: JSONSchema7): JSONSchema7 
     // Codex also applies lossy compaction above 4 KB; defer that until OpenCode needs the same schema budget.
   }
 
-  if (model.providerID === "moonshotai" || model.api.id.toLowerCase().includes("kimi")) {
+  if (ProviderInheritance.isProvider(model, "moonshotai") || model.api.id.toLowerCase().includes("kimi")) {
     const sanitizeMoonshot = (obj: unknown): unknown => {
       if (obj === null || typeof obj !== "object") return obj
       if (Array.isArray(obj)) return obj.map(sanitizeMoonshot)
@@ -1552,7 +1553,7 @@ export function schema(model: Provider.Model, schema: JSONSchema7): JSONSchema7 
   }
 
   // Convert integer enums to string enums for Google/Gemini
-  if (model.providerID === "google" || model.api.id.includes("gemini")) {
+  if (ProviderInheritance.isProvider(model, "google") || model.api.id.includes("gemini")) {
     const isPlainObject = (node: unknown): node is Record<string, any> =>
       typeof node === "object" && node !== null && !Array.isArray(node)
     const hasCombiner = (node: unknown) =>
