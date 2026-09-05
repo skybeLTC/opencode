@@ -97,6 +97,9 @@ fi
 [[ -x packages/opencode/script/build.ts ]] ||
     die "upstream build entry point is missing or not executable: packages/opencode/script/build.ts"
 
+[[ -f packages/opencode/script/schema.ts ]] ||
+    die "upstream config schema generator is missing: packages/opencode/script/schema.ts"
+
 echo "OpenCode local build preflight"
 echo "  package manager : ${package_manager}"
 echo "  bun             : ${actual_bun}"
@@ -104,6 +107,7 @@ echo "  bun binary      : ${bun_path}"
 echo "  lockfile        : bun.lock"
 echo "  dependencies    : node_modules present"
 echo "  build entry     : packages/opencode/script/build.ts --single"
+echo "  schema entry    : packages/opencode/script/schema.ts"
 echo
 
 BASE_TAG="$(
@@ -128,3 +132,21 @@ echo
 
 OPENCODE_VERSION="${VERSION}" \
     ./packages/opencode/script/build.ts --single
+
+schema_output="packages/opencode/dist/opencode.schema.json"
+
+echo
+echo "OpenCode local config schema"
+echo "  source  : packages/opencode/script/schema.ts"
+echo "  output  : ${schema_output}"
+echo
+
+(
+    cd packages/opencode
+    bun run script/schema.ts "${repo_root}/${schema_output}"
+)
+
+[[ -s "$schema_output" ]] ||
+    die "generated config schema is missing or empty: ${schema_output}"
+
+echo "Schema generated: ${schema_output}"

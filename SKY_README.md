@@ -212,7 +212,7 @@ abcdef1234    example 10-character abbreviated source commit
 
 ## 6. `sky-tools/build-local.sh`
 
-`sky-tools/build-local.sh` 只負責 local build orchestration，以及 build 前的 read-only Bun contract preflight。
+`sky-tools/build-local.sh` 負責 local build orchestration、build 前的 read-only Bun contract preflight，以及 upstream build 成功後由同一份 checkout 產生 version-matched OpenCode config schema。
 
 ### 6.1 Version-pinned host tool
 
@@ -390,6 +390,25 @@ push
 切 branch
 merge upstream/dev
 ```
+
+---
+
+### 6.4 Version-matched config schema
+
+OpenCode config schema 屬於 release/build artifact，authority 是目前 maintenance branch 的 OpenCode source，而不是 sibling `local-ai` config repository。
+
+`sky-tools/build-local.sh` 在 upstream build 成功返回後產生：
+
+```text
+source : packages/opencode/script/schema.ts
+output : packages/opencode/dist/opencode.schema.json
+```
+
+生成順序不能移到 upstream build 前。`packages/opencode/script/build.ts` 會在 build 過程先清除 `packages/opencode/dist/`；若提前生成 schema，會被 upstream build 刪除。
+
+`packages/opencode/dist/` 是 ignored generated state，因此 `opencode.schema.json` 不 commit。每次執行 local build 都從目前 checkout 重新產生，使 binary 與 config schema 維持相同 source version。
+
+不要手動維護這份 schema，也不要用 published `https://opencode.ai/config.json` 覆蓋它。consumer config 只 reference generated artifact；schema generation 與更新規則由本節維護。
 
 ---
 
@@ -929,6 +948,7 @@ release migration 時，必須先依 Section 10.2 從 target official tag 重新
 typecheck passes
 build passes
 upstream smoke test passes
+version-matched config schema is generated from the current checkout
 binary version is correct
 working tree is clean
 ```
@@ -1063,7 +1083,7 @@ SKY_README.md
 └── release maintenance / AI operating context
 
 sky-tools/build-local.sh
-└── reproducible local build entry point
+└── reproducible local build entry point + version-matched config schema generation
 
 sky-tools/check-release.sh
 └── adopted / available release observation
