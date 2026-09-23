@@ -178,6 +178,61 @@ it.instance(
 )
 
 it.instance(
+  "config-only provider inherits built-in catalog and filtering",
+  Effect.gen(function* () {
+    const providerID = ProviderV2.ID.make("anthropic-alias")
+    const providers = yield* list
+    const provider = providers[providerID]
+    expect(provider).toBeDefined()
+    expect(provider.baseProviderID).toBe(ProviderV2.ID.anthropic)
+    expect(provider.options.apiKey).toBe("alias-key")
+    expect(Object.keys(provider.models)).toEqual(["claude-sonnet-4-6"])
+    expect(provider.models["claude-sonnet-4-6"].providerID).toBe(providerID)
+    expect(provider.models["claude-sonnet-4-6"].baseProviderID).toBe(ProviderV2.ID.anthropic)
+  }),
+  {
+    config: {
+      provider: {
+        "anthropic-alias": {
+          name: "Anthropic Alias",
+          npm: "@ai-sdk/anthropic",
+          whitelist: ["claude-sonnet-4-6"],
+          options: { apiKey: "alias-key" },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
+  "explicit model SDK override clears inherited model behavior",
+  Effect.gen(function* () {
+    const providerID = ProviderV2.ID.make("anthropic-alias")
+    const providers = yield* list
+    const provider = providers[providerID]
+    expect(provider.baseProviderID).toBe(ProviderV2.ID.anthropic)
+    expect(provider.models["custom-openai"].providerID).toBe(providerID)
+    expect(provider.models["custom-openai"].api.npm).toBe("@ai-sdk/openai-compatible")
+    expect(provider.models["custom-openai"].baseProviderID).toBeUndefined()
+  }),
+  {
+    config: {
+      provider: {
+        "anthropic-alias": {
+          npm: "@ai-sdk/anthropic",
+          models: {
+            "custom-openai": {
+              provider: { npm: "@ai-sdk/openai-compatible" },
+              limit: { context: 8192, output: 2048 },
+            },
+          },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
   "custom model alias via config",
   Effect.gen(function* () {
     yield* setProcessEnv("ANTHROPIC_API_KEY", "test-api-key")

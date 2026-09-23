@@ -206,7 +206,8 @@ export async function XaiAuthPlugin(input: PluginInput, options: XaiAuthPluginOp
   return {
     auth: {
       provider: "xai",
-      async loader(getAuth) {
+      async loader(getAuth, provider) {
+        const providerID = provider.id
         const auth = await getAuth()
         if (auth.type !== "oauth") return {}
 
@@ -252,7 +253,7 @@ export async function XaiAuthPlugin(input: PluginInput, options: XaiAuthPluginOp
                     // 4xx and force re-login — a known cross-process limitation.
                     await input.client.auth
                       .set({
-                        path: { id: "xai" },
+                        path: { id: providerID },
                         body: {
                           type: "oauth",
                           access: tokens.access_token,

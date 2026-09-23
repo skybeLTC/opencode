@@ -8,6 +8,7 @@ import type { Agent } from "@/agent/agent"
 import type { MessageV2 } from "../message-v2"
 import type { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
+import * as ProviderInheritance from "@/provider/inheritance"
 import { SystemPrompt } from "../system"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Effect, Record } from "effect"
@@ -54,7 +55,7 @@ const mergeOptions = (target: Record<string, any>, source: Record<string, any> |
   mergeDeep(target, source ?? {}) as Record<string, any>
 
 export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: PrepareInput) {
-  const isOpenaiOauth = input.provider.id === "openai" && input.auth?.type === "oauth"
+  const isOpenaiOauth = ProviderInheritance.isProvider(input.model, "openai") && input.auth?.type === "oauth"
   const system = [
     [
       ...(input.agent.prompt ? [input.agent.prompt] : SystemPrompt.provider(input.model)),
@@ -157,7 +158,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     for (const key of Object.keys(tools)) tools[key] = { ...tools[key], strict: false }
   }
   if (
-    input.model.providerID.includes("github-copilot") &&
+    (ProviderInheritance.baseProviderID(input.model) ?? input.model.providerID).includes("github-copilot") &&
     Object.keys(tools).length === 0 &&
     hasToolCalls(input.messages)
   ) {
@@ -174,9 +175,8 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     })
   }
 
-  const opencodeProjectID = input.model.providerID.startsWith("opencode")
-    ? (yield* InstanceState.context).project.id
-    : undefined
+  const baseProviderID = ProviderInheritance.baseProviderID(input.model) ?? input.model.providerID
+  const opencodeProjectID = baseProviderID.startsWith("opencode") ? (yield* InstanceState.context).project.id : undefined
 
   return {
     system,
@@ -185,7 +185,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     params,
     messageTransformOptions: options,
     headers: {
-      ...(input.model.providerID.startsWith("opencode")
+      ...(baseProviderID.startsWith("opencode")
         ? {
             ...(opencodeProjectID ? { "x-opencode-project": opencodeProjectID } : {}),
             "x-opencode-session": input.sessionID,

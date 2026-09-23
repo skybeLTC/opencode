@@ -17,6 +17,7 @@ import { Process } from "@/util/process"
 import { errorMessage } from "@/util/error"
 import { text } from "node:stream/consumers"
 import { Effect, Option } from "effect"
+import * as ProviderInheritance from "@/provider/inheritance"
 
 type PluginAuth = NonNullable<Hooks["auth"]>
 
@@ -212,6 +213,8 @@ const handlePluginAuth = Effect.fn("Cli.providers.pluginAuth")(function* (
 export function resolvePluginProviders(input: {
   hooks: Hooks[]
   existingProviders: Record<string, unknown>
+  configuredProviders?: Record<string, { npm?: string; models?: Record<string, unknown>; name?: string }>
+  catalogProviders?: Record<string, { npm?: string }>
   disabled: Set<string>
   enabled?: Set<string>
   providerNames: Record<string, string | undefined>
@@ -227,6 +230,24 @@ export function resolvePluginProviders(input: {
     if (Object.hasOwn(input.existingProviders, id)) continue
     if (input.disabled.has(id)) continue
     if (input.enabled && !input.enabled.has(id)) continue
+    result.push({
+      id,
+      name: input.providerNames[id] ?? id,
+    })
+  }
+
+  for (const [id, provider] of Object.entries(input.configuredProviders ?? {})) {
+    if (seen.has(id)) continue
+    if (input.disabled.has(id)) continue
+    if (input.enabled && !input.enabled.has(id)) continue
+    const base = ProviderInheritance.inferBaseProviderID({
+      providerID: id,
+      provider,
+      catalog: input.catalogProviders ?? {},
+    })
+    if (!base) continue
+    if (!input.hooks.some((hook) => hook.auth?.provider === base)) continue
+    seen.add(id)
     result.push({
       id,
       name: input.providerNames[id] ?? id,
@@ -380,6 +401,8 @@ export const ProvidersLoginCommand = effectCmd({
     const pluginProviders = resolvePluginProviders({
       hooks,
       existingProviders: providers,
+      configuredProviders: config.provider ?? {},
+      catalogProviders: allProviders,
       disabled,
       enabled,
       providerNames: Object.fromEntries(Object.entries(config.provider ?? {}).map(([id, p]) => [id, p.name])),
@@ -428,7 +451,14 @@ export const ProvidersLoginCommand = effectCmd({
       )
     }
 
-    const plugin = hooks.findLast((x) => x.auth?.provider === provider)
+    const inheritedProvider = config.provider?.[provider]
+      ? ProviderInheritance.inferBaseProviderID({
+          providerID: provider,
+          provider: config.provider[provider],
+          catalog: allProviders,
+        })
+      : undefined
+    const plugin = hooks.findLast((x) => x.auth?.provider === provider || x.auth?.provider === inheritedProvider)
     if (plugin && plugin.auth) {
       const handled = yield* handlePluginAuth({ auth: plugin.auth! }, provider, args.method)
       if (handled) return

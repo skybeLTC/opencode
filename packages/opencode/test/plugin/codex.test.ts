@@ -216,6 +216,77 @@ describe("plugin.codex", () => {
     await enabled.dispose?.()
   })
 
+  test("preserves built-in OpenAI Codex hooks for API auth", async () => {
+    const hooks = await CodexAuthPlugin({} as never)
+    await hooks.auth!.loader!(
+      async () => ({ type: "api", key: "sk-test" }) as never,
+      { id: "openai" } as never,
+    )
+
+    const params = { maxOutputTokens: 32_000 }
+    await hooks["chat.params"]!(
+      { model: { providerID: "openai" } } as never,
+      params as never,
+    )
+    expect(params.maxOutputTokens).toBeUndefined()
+
+    const headers = { headers: {} as Record<string, string> }
+    await hooks["chat.headers"]!(
+      { model: { providerID: "openai" }, sessionID: "session-test" } as never,
+      headers,
+    )
+    expect(headers.headers.originator).toBe("opencode")
+    await hooks.dispose?.()
+  })
+
+  test("does not apply Codex hooks to an inherited OpenAI alias using API auth", async () => {
+    const hooks = await CodexAuthPlugin({} as never)
+    await hooks.auth!.loader!(
+      async () => ({ type: "api", key: "sk-test" }) as never,
+      { id: "openai-alias" } as never,
+    )
+
+    const model = { providerID: "openai-alias", baseProviderID: "openai" }
+    const params = { maxOutputTokens: 32_000 }
+    await hooks["chat.params"]!({ model } as never, params as never)
+    expect(params.maxOutputTokens).toBe(32_000)
+
+    const headers = { headers: {} as Record<string, string> }
+    await hooks["chat.headers"]!(
+      { model, sessionID: "session-test" } as never,
+      headers,
+    )
+    expect(headers.headers.originator).toBeUndefined()
+    await hooks.dispose?.()
+  })
+
+  test("applies Codex hooks to an inherited OpenAI alias using OAuth", async () => {
+    const hooks = await CodexAuthPlugin({} as never)
+    await hooks.auth!.loader!(
+      async () =>
+        ({
+          type: "oauth",
+          refresh: "refresh",
+          access: "access",
+          expires: Date.now() + 60_000,
+        }) as never,
+      { id: "openai-alias" } as never,
+    )
+
+    const model = { providerID: "openai-alias", baseProviderID: "openai" }
+    const params = { maxOutputTokens: 32_000 }
+    await hooks["chat.params"]!({ model } as never, params as never)
+    expect(params.maxOutputTokens).toBeUndefined()
+
+    const headers = { headers: {} as Record<string, string> }
+    await hooks["chat.headers"]!(
+      { model, sessionID: "session-test" } as never,
+      headers,
+    )
+    expect(headers.headers.originator).toBe("opencode")
+    await hooks.dispose?.()
+  })
+
   test("sends token residency only to the ChatGPT Codex backend", async () => {
     const requests: Array<{ path: string; residency: string | null }> = []
     using server = Bun.serve({

@@ -108,6 +108,18 @@ describe("resolvePluginProviders", () => {
     expect(result).toEqual([{ id: "portkey", name: "portkey" }])
   })
 
+  test("includes configured aliases for inherited plugin auth", () => {
+    const result = resolvePluginProviders({
+      hooks: [hookWithAuth("openai")],
+      existingProviders: { openai: {} },
+      configuredProviders: { "openai-alias": { npm: "@ai-sdk/openai", name: "OpenAI Alias" } },
+      catalogProviders: { openai: { npm: "@ai-sdk/openai" } },
+      disabled: new Set(),
+      providerNames: { "openai-alias": "OpenAI Alias" },
+    })
+    expect(result).toEqual([{ id: "openai-alias", name: "OpenAI Alias" }])
+  })
+
   test("returns empty for no hooks", () => {
     const result = resolvePluginProviders({
       hooks: [],
