@@ -1256,6 +1256,62 @@ regression
 
 驗證紀錄只保留 durable contract；某次 migration 的 exact commands、PASS output 與具體 provider/model smoke results 放在該 logical change 的 commit message，不在本節累積 chronological transcript。
 
+### 16.2 Current Product Patch: GPT-6 Sol / Luna Codex OAuth Backport
+
+`v1.18.32` 已包含 GPT-6 Astra 所需的 Codex OAuth integer-major model filtering 與 GPT-6 Astra system prompt，但該 stable release 早於 GPT-6 Sol / Luna 的 upstream Codex allowlist 更新。
+
+因此目前 release branch 額外維護一個最小 backport，只處理 ChatGPT Pro / Plus Codex OAuth model filtering：
+
+```text
+OpenAI / Codex OAuth model catalog
+├── gpt-6-astra  : base release already supports
+├── gpt-6-sol    : local upstream backport
+└── gpt-6-luna   : local upstream backport
+```
+
+這顆 patch 不自行建立 model metadata，也不改 provider transport、system prompt selection 或 credential storage。Model metadata 仍由目前 OpenCode provider catalog 路徑提供；backport 只讓 upstream catalog 中的 Sol / Luna 通過 Codex OAuth allowlist，並保留 upstream 對應 tests。
+
+Provider inheritance 與這顆 patch 的 boundary：
+
+```text
+base / inherited OpenAI provider identity
+└── 仍由 Section 16.1 的 provider-inheritance patch 處理
+
+Codex OAuth model allowlist
+└── 依 model API ID 決定 Sol / Luna 是否可暴露
+```
+
+#### Removal condition
+
+採用新的 official stable release 時，先確認 target tag 是否已包含等價的 Sol / Luna Codex OAuth allowlist 與 tests。
+
+```text
+DROP
+└── target stable 已原生包含等價 behavior
+
+KEEP / MODIFY
+└── target stable 仍缺少該 behavior，或 Codex model-filter contract 已改變
+```
+
+不要因為 target 版本號較新就保留或移除；以 target tag 的 `packages/opencode/src/plugin/openai/codex.ts` 與對應 tests 為準。
+
+#### Functional validation
+
+除 Section 13 baseline 與 Section 16.1 相關 regression checks 外，至少驗證：
+
+```text
+Codex model filtering
+├── gpt-6-astra 仍可見
+├── gpt-6-sol 可見
+└── gpt-6-luna 可見
+
+runtime
+├── base OpenAI OAuth path 可完成實際 request
+└── 若使用 inherited OpenAI OAuth alias，alias path 仍維持自己的 auth namespace
+```
+
+model listing 只能證明 discovery / filtering；若帳號具備對應 model entitlement，至少再做一次實際 request，避免把「出現在 model list」誤當成 end-to-end runtime 已驗證。
+
 ---
 
 ## 17. AI Agent Rules
@@ -1390,6 +1446,12 @@ documented commands
 修改、review 或 migration provider-inheritance product patch 時，先讀 Section 16.1 的 identity boundary、migration / removal decision 與 functional validation。
 
 不要把 machine-specific provider alias、model inventory、endpoint 或 credential 寫進 public product source / documentation。
+
+### Rule 13 — GPT-6 Sol / Luna backport 依 Section 16.2
+
+migration 時先確認 target official stable 是否已原生包含等價 Codex OAuth allowlist 與 tests；已 upstream 時 drop local backport，不重複維護。
+
+不要把 model list 可見性當成完整 runtime validation；具備 entitlement 時仍需做實際 request smoke test。
 
 ---
 
