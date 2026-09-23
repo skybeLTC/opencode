@@ -230,37 +230,50 @@ vscode-v0.0.x
 
 ### 4.1 Upstream release observation
 
-`git fetch upstream` 的角色是更新官方 observation refs，不代表 Sky 自動採用新版。
+`git fetch upstream` 的角色是更新官方 observation / release-base refs，不代表 Sky 自動採用新版。
 
 必須區分：
 
 ```text
-latest upstream stable
+observed Git tag
+!=
+published stable release
 !=
 currently adopted Sky release
 ```
 
-看到新的官方 `vX.Y.Z` tag，只代表該 release **available**。預設不因此：
+strict `vX.Y.Z` Git tag 本身不構成 stable release authority。upstream 可以先建立 tag，再於稍後建立 GitHub Release；也可能存在 strict version tag，但沒有對應的 published stable release。
 
-- 建立新的 `sky/vX.Y.Z` branch。
-- 修改目前 adopted release branch。
-- migration local patches。
-- rebuild / publish 新版本。
+本 fork 將 **GitHub published stable release** 視為 release availability authority：
 
-日常檢查是否有新的 stable release：
+```text
+draft      = false
+prerelease = false
+tag_name   = strict vX.Y.Z
+```
+
+`sky-tools/check-release.sh` 會：
+
+1. fetch `origin` 與 `upstream`，更新 adopted branches 與 local tag/base refs。
+2. 透過 GitHub Releases API 取得 upstream latest published stable release。
+3. 驗證該 release 的 strict `vX.Y.Z` tag 已由 upstream fetch 到 local repository。
+4. 將 published stable release 與 `origin/sky/vX.Y.Z` 中最高 adopted release 比較。
+5. 另外顯示 local strict tags 中最高的 observed tag；較新的 observed tag 不會自行被視為 stable release。
+
+日常檢查：
 
 ```bash
 ./sky-tools/check-release.sh
 ```
 
-此工具會先 fetch `origin` 與 `upstream`，再以 strict `vX.Y.Z` 比較。
-
 範例輸出（版本號僅代表當時的 repository state）：
 
 ```text
-Latest adopted   : v1.18.18
-Latest available : v1.18.23
-Upgrade available: YES
+Adopted release          : v1.18.32
+Published stable release : v1.18.32
+Highest observed tag     : v2.0.14
+Upgrade available        : NO
+Newer tag observed       : YES
 ```
 
 定義：
@@ -269,15 +282,29 @@ Upgrade available: YES
 Latest adopted
 └── origin/sky/vX.Y.Z 中版本最高的 adopted release
 
-Latest available
-└── upstream fetch 後 strict vX.Y.Z official tags 中版本最高的 release
+Latest published stable release
+└── GitHub /releases/latest 回傳的 published stable release
+    且 tag_name 必須符合 strict vX.Y.Z
+
+Highest observed tag
+└── git fetch upstream 後 local strict vX.Y.Z tags 中版本最高者
+    只代表 tag observation，不代表 release availability
 ```
 
 `Latest adopted` 不代表目前 checkout 的 branch。
 
+若 GitHub Release API 無法查詢、response 無法解析、latest published stable release tag 不符合 strict `vX.Y.Z`，或該 published stable release tag 沒有由 upstream fetch 到 local repository，`check-release.sh` 必須 fail closed；不得 fallback 成「把最高 strict Git tag 當 stable release」。
+
+看到較新的 observed `vX.Y.Z` tag，預設不因此：
+
+- 建立新的 `sky/vX.Y.Z` branch。
+- 修改目前 adopted release branch。
+- migration local patches。
+- rebuild / publish 新版本。
+
 `check-release.sh` 只觀察 release state；即使 `Upgrade available: YES`，也不會建立 branch、migration patches、build 或 publish。
 
-`Upgrade available: YES` 只表示存在版本更高的 official stable tag，不代表：
+`Upgrade available: YES` 只表示存在版本更高的 published stable release，不代表：
 
 ```text
 compatibility reviewed
@@ -293,50 +320,65 @@ Sky 可以繼續維護目前 adopted release，也可以明確決定跳過一個
 
 真正採用新版時，才依目前 release branch 的 `SKY_README.md` 執行 release adoption / migration。
 
-### 4.2 Official stable tag archive
+### 4.2 Adopted release base tag archive
 
-`git fetch upstream` 只會把 upstream 的 official tag refs 更新到 local repository，不會把 local tags 自動 publish 到 `origin`。
+`git fetch upstream` 只會把 upstream tag refs 更新到 local repository，不會把 local tags 自動 publish 到 `origin`。
 
 因此要區分三個角色：
 
 ```text
-upstream strict vX.Y.Z tags
-    ↓ authoritative source
+upstream GitHub published stable releases
+    ↓ release authority
 
-local strict vX.Y.Z tags
-    ↓ observation / release-base refs
+upstream/local strict vX.Y.Z tags
+    ↓ observation / release-base candidates
 
-origin strict vX.Y.Z tags
-    ↓ archival copy in the Sky fork
+origin adopted-release base tags
+    ↓ base refs for retained sky/vX.Y.Z branches
 ```
 
-`origin` 的 stable-tag archive 可能暫時落後於 local / upstream。這不改變：
+`origin` **不作為 upstream stable-release tag mirror**。只有 retained `origin/sky/vX.Y.Z` branch 實際使用的 matching `vX.Y.Z` base tag，才需要保留在 `origin`。
 
-- `Latest available`：仍以 `git fetch upstream` 後的 local strict official tags 判定。
+這不改變：
+
+- `Latest published stable release`：由 upstream GitHub published stable release 判定。
+- `Highest observed tag`：由 `git fetch upstream` 後的 local strict tags 判定。
 - `Latest adopted`：仍以 published `origin/sky/vX.Y.Z` branches 判定。
 
-`sky-tools/check-release.sh` 與 `sky-tools/setup-local-repo.sh` 都不負責把 tags publish 到 `origin`。tag publication 是明確、獨立的 repository mutation，不應偷偷附帶在 observation / bootstrap workflow 中。
+`sky-tools/check-release.sh` 與 `sky-tools/setup-local-repo.sh` 都不負責把 tags publish 到 `origin`。tag publication / deletion 是明確、獨立的 repository mutation，不應偷偷附帶在 observation / bootstrap workflow 中。
 
-只 archive strict stable tags：
+origin base-tag retention candidate 必須同時符合：
 
 ```text
-^v[0-9]+\.[0-9]+\.[0-9]+$
+matching branch = origin/sky/vX.Y.Z exists and is retained
+tag name        = matching vX.Y.Z
+GitHub Release exists
+release.draft      = false
+release.prerelease = false
 ```
 
-不要因為 upstream fetch refspec 是 `v*`，就把例如：
+strict SemVer-shaped Git tag **不是**充分條件。對每個待 publish base tag，先確認 matching retained release branch，再確認 upstream 的 `releases/tags/<tag>` 存在 published stable release，最後驗證 local tag commit identity 與 upstream 完全相同。
+
+不要因為 upstream fetch refspec 是 `v*`，或某個 published stable release 存在，就把未採用的 intermediate release tags publish 到 `origin`。例如 Sky 從 `v1.18.20` 直接採用 `v1.18.32` 時，`v1.18.21` 到 `v1.18.31` 不因為存在 published stable releases 就需要成為 origin archive tags。
+
+也不要因為 upstream fetch refspec 是 `v*`，就把例如：
 
 ```text
 vscode-v0.0.x
 ```
 
-這類 non-strict tags 一起 push 到 `origin`。
+這類 non-strict tags publish 到 `origin`。
 
-publish 缺少的 official stable tags 前，至少確認：
+既有 `origin` strict release tag 若沒有 matching retained `sky/vX.Y.Z` branch，屬於 cleanup candidate。刪除前仍須獨立 audit；tag deletion 不代表刪除 upstream/local observation tag，也不改變 upstream release history。
 
-1. upstream / local / origin strict stable tag set。
-2. 每個待 publish tag 的 local commit identity 與 upstream 完全相同。
-3. `origin` 尚不存在同名 tag。
-4. 不覆寫、改寫或 force-update 既有 origin tag。
+publish 缺少的 adopted-release base tag 或清理既有 tag 前，至少確認：
+
+1. retained `origin/sky/vX.Y.Z` branch set。
+2. matching base tag 的 upstream published stable-release status。
+3. 每個 retained base tag 的 local commit identity 與 upstream 完全相同。
+4. 待新增 tag 在 `origin` 尚不存在；待刪除 tag 沒有 matching retained `sky/vX.Y.Z` branch。
+5. 不覆寫、改寫或 force-update 既有 retained origin base tag。
+6. exact remote tag create/delete set 已在 mutation 前 review。
 
 需要比較 set 時，`comm` 的輸入必須使用相同的 lexical sort，例如：
 
@@ -346,26 +388,9 @@ LC_ALL=C sort -u
 
 不要先用 `sort -V` 再直接交給 `comm`；version sort 與 `comm` 要求的 lexical ordering 不相同。需要顯示人類易讀的版本順序時，可以在 `comm` 完成後再 `sort -V`。
 
-publish 時只明確指定已驗證、缺少的 strict stable tags。多個 tags 一起 publish 時優先使用 atomic push：
+remote tag mutation 時只明確指定已驗證的 create/delete refs。多個 refs 一起更新時優先使用 atomic push；不要使用 `git push --tags`、`git push --force --tags`，也不要 force-update retained base tags。
 
-```bash
-git push \
-    --atomic \
-    origin \
-    refs/tags/vX.Y.A:refs/tags/vX.Y.A \
-    refs/tags/vX.Y.B:refs/tags/vX.Y.B
-```
-
-不要使用：
-
-```bash
-git push --tags
-git push --force --tags
-```
-
-也不要 force-update `origin` 上既有的 official stable tag。
-
-publish 後重新比對 upstream / local / origin tag identities 與 strict stable tag set。只有 identity 與 set 都符合預期，才算 archive synchronization 完成。
+mutation 後重新比對 retained branch/base-tag set 與 tag identities。只有 remote refs 與預期完全一致，才算 synchronization 完成。
 
 若 upstream 改寫已存在的同名 `v*` tag，因 `remote.upstream.fetch` 的 tag refspec 沒有前導 `+`，正常 fetch 應停止而不是強制覆寫 local tag。此時不要繞過保護，先 review upstream tag rewrite。
 
