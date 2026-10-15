@@ -55,7 +55,7 @@ import { eq } from "drizzle-orm"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
-import { LLMEvent } from "@opencode-ai/llm"
+import { titleOutput } from "./title-output"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -222,7 +222,8 @@ const layer = Layer.effect(
       const msgs = onlySubtasks
         ? [{ role: "user" as const, content: subtasks.map((p) => p.prompt).join("\n") }]
         : yield* MessageV2.toModelMessagesEffect(context, mdl)
-      const text = yield* llm
+      const output = titleOutput()
+      yield* llm
         .stream({
           agent: ag,
           user: firstInfo,
@@ -235,11 +236,10 @@ const layer = Layer.effect(
           messages: [{ role: "user", content: "Generate a title for this conversation:\n" }, ...msgs],
         })
         .pipe(
-          Stream.filter(LLMEvent.is.textDelta),
-          Stream.map((e) => e.text),
-          Stream.mkString,
+          Stream.runForEach((event) => Effect.sync(() => output.accept(event))),
           Effect.orDie,
         )
+      const text = output.value()
       const cleaned = text
         .replace(/<think>[\s\S]*?<\/think>\s*/g, "")
         .split("\n")

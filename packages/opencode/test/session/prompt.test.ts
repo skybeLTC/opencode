@@ -2208,6 +2208,35 @@ noLLMServer.instance(
   { config: cfg },
 )
 
+it.instance("generates and persists a title for the first user message", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({})
+
+    expect(Session.isDefaultTitle(chat.title)).toBe(true)
+
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "hello" }],
+    })
+
+    yield* llm.text("world")
+    yield* prompt.loop({ sessionID: chat.id })
+
+    const title = yield* pollWithTimeout(
+      sessions.get(chat.id).pipe(Effect.map((saved) => (saved.title === "E2E Title" ? saved.title : undefined))),
+      "title was not persisted",
+      "10 seconds",
+    )
+
+    expect(title).toBe("E2E Title")
+  }),
+)
+
 // Special characters in filenames
 
 noLLMServer.instance(
