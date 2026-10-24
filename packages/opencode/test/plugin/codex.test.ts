@@ -216,6 +216,77 @@ describe("plugin.codex", () => {
     await enabled.dispose?.()
   })
 
+  test("preserves built-in OpenAI Codex hooks for API auth", async () => {
+    const hooks = await CodexAuthPlugin({} as never)
+    await hooks.auth!.loader!(
+      async () => ({ type: "api", key: "sk-test" }) as never,
+      { id: "openai" } as never,
+    )
+
+    const params = { maxOutputTokens: 32_000 }
+    await hooks["chat.params"]!(
+      { model: { providerID: "openai" } } as never,
+      params as never,
+    )
+    expect(params.maxOutputTokens).toBeUndefined()
+
+    const headers = { headers: {} as Record<string, string> }
+    await hooks["chat.headers"]!(
+      { model: { providerID: "openai" }, sessionID: "session-test" } as never,
+      headers,
+    )
+    expect(headers.headers.originator).toBe("opencode")
+    await hooks.dispose?.()
+  })
+
+  test("does not apply Codex hooks to an inherited OpenAI alias using API auth", async () => {
+    const hooks = await CodexAuthPlugin({} as never)
+    await hooks.auth!.loader!(
+      async () => ({ type: "api", key: "sk-test" }) as never,
+      { id: "openai-alias" } as never,
+    )
+
+    const model = { providerID: "openai-alias", baseProviderID: "openai" }
+    const params = { maxOutputTokens: 32_000 }
+    await hooks["chat.params"]!({ model } as never, params as never)
+    expect(params.maxOutputTokens).toBe(32_000)
+
+    const headers = { headers: {} as Record<string, string> }
+    await hooks["chat.headers"]!(
+      { model, sessionID: "session-test" } as never,
+      headers,
+    )
+    expect(headers.headers.originator).toBeUndefined()
+    await hooks.dispose?.()
+  })
+
+  test("applies Codex hooks to an inherited OpenAI alias using OAuth", async () => {
+    const hooks = await CodexAuthPlugin({} as never)
+    await hooks.auth!.loader!(
+      async () =>
+        ({
+          type: "oauth",
+          refresh: "refresh",
+          access: "access",
+          expires: Date.now() + 60_000,
+        }) as never,
+      { id: "openai-alias" } as never,
+    )
+
+    const model = { providerID: "openai-alias", baseProviderID: "openai" }
+    const params = { maxOutputTokens: 32_000 }
+    await hooks["chat.params"]!({ model } as never, params as never)
+    expect(params.maxOutputTokens).toBeUndefined()
+
+    const headers = { headers: {} as Record<string, string> }
+    await hooks["chat.headers"]!(
+      { model, sessionID: "session-test" } as never,
+      headers,
+    )
+    expect(headers.headers.originator).toBe("opencode")
+    await hooks.dispose?.()
+  })
+
   test("sends token residency only to the ChatGPT Codex backend", async () => {
     const requests: Array<{ path: string; residency: string | null }> = []
     using server = Bun.serve({
@@ -380,6 +451,7 @@ describe("plugin.codex", () => {
       expires: 0,
     }
     const authUpdates: Array<{
+      path: { id: string }
       body: { refresh: string; access: string; expires: number; accountId?: string }
     }> = []
     let resolveRefresh: (() => void) | undefined
@@ -422,8 +494,9 @@ describe("plugin.codex", () => {
       {
         client: {
           auth: {
-            async set(input: { body: { refresh: string; access: string; expires: number; accountId?: string } }) {
+            async set(input: { path: { id: string }; body: { refresh: string; access: string; expires: number; accountId?: string } }) {
               authUpdates.push(input)
+              expect(input.path.id).toBe("openai-alias")
               auth = {
                 type: "oauth",
                 refresh: input.body.refresh,
@@ -448,7 +521,7 @@ describe("plugin.codex", () => {
         codexApiEndpoint: new URL("/backend-api/codex/responses", server.url).toString(),
       },
     )
-    const loaded = await hooks.auth!.loader!(async () => auth as never, {} as never)
+    const loaded = await hooks.auth!.loader!(async () => auth as never, { id: "openai-alias" } as never)
 
     const first = loaded.fetch!("https://api.openai.com/v1/responses")
     const second = loaded.fetch!("https://api.openai.com/v1/responses")
@@ -461,6 +534,7 @@ describe("plugin.codex", () => {
 
     expect(refreshRequests).toBe(1)
     expect(authUpdates).toHaveLength(1)
+    expect(authUpdates[0]?.path.id).toBe("openai-alias")
     expect(authUpdates[0]?.body.refresh).toBe("refresh-new")
     expect(authUpdates[0]?.body.access).toBe(refreshedAccess)
     expect(authUpdates[0]?.body.accountId).toBe("acc-123")

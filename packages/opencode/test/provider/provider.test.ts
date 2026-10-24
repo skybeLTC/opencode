@@ -109,6 +109,198 @@ const alphaProviderConfig = {
   },
 }
 
+it.instance(
+  "Bedrock base and inherited alias keep separate stored bearer credentials",
+  Effect.gen(function* () {
+    yield* remove("AWS_BEARER_TOKEN_BEDROCK")
+    yield* setProcessEnv(
+      "OPENCODE_AUTH_CONTENT",
+      JSON.stringify({
+        "amazon-bedrock": { type: "api", key: "base-bedrock-test-token" },
+        "bedrock-alias": { type: "api", key: "alias-bedrock-test-token" },
+      }),
+    )
+    const providers = yield* list
+    const base = providers[ProviderV2.ID.make("amazon-bedrock")]
+    const alias = providers[ProviderV2.ID.make("bedrock-alias")]
+    expect(base).toBeDefined()
+    expect(alias).toBeDefined()
+    expect(alias.baseProviderID).toBe(ProviderV2.ID.make("amazon-bedrock"))
+    expect(base.options.apiKey).toBe("base-bedrock-test-token")
+    expect(alias.options.apiKey).toBe("alias-bedrock-test-token")
+    expect(base.options.region).toBe("us-east-1")
+    expect(alias.options.region).toBe("eu-west-1")
+    expect(process.env.AWS_BEARER_TOKEN_BEDROCK).toBeUndefined()
+  }),
+  {
+    config: {
+      provider: {
+        "amazon-bedrock": { options: { region: "us-east-1" } },
+        "bedrock-alias": { npm: "@ai-sdk/amazon-bedrock", options: { region: "eu-west-1" } },
+      },
+    },
+  },
+)
+
+it.instance(
+  "Bedrock alias saved credential takes precedence over shared environment token",
+  Effect.gen(function* () {
+    yield* set("AWS_BEARER_TOKEN_BEDROCK", "shared-environment-test-token")
+    yield* setProcessEnv(
+      "OPENCODE_AUTH_CONTENT",
+      JSON.stringify({
+        "amazon-bedrock": { type: "api", key: "base-bedrock-test-token" },
+        "bedrock-alias": { type: "api", key: "alias-bedrock-test-token" },
+      }),
+    )
+    const providers = yield* list
+    const base = providers[ProviderV2.ID.make("amazon-bedrock")]
+    const alias = providers[ProviderV2.ID.make("bedrock-alias")]
+    expect(base).toBeDefined()
+    expect(alias).toBeDefined()
+    expect(base.options.apiKey).toBe("shared-environment-test-token")
+    expect(alias.options.apiKey).toBe("alias-bedrock-test-token")
+    expect(process.env.AWS_BEARER_TOKEN_BEDROCK).toBe("shared-environment-test-token")
+  }),
+  {
+    config: {
+      provider: {
+        "bedrock-alias": { npm: "@ai-sdk/amazon-bedrock", options: { region: "eu-west-1" } },
+      },
+    },
+  },
+)
+
+it.instance(
+  "Bedrock alias does not adopt a base-only stored bearer credential",
+  Effect.gen(function* () {
+    yield* remove("AWS_BEARER_TOKEN_BEDROCK")
+    yield* setProcessEnv(
+      "OPENCODE_AUTH_CONTENT",
+      JSON.stringify({ "amazon-bedrock": { type: "api", key: "base-bedrock-test-token" } }),
+    )
+    const providers = yield* list
+    const base = providers[ProviderV2.ID.make("amazon-bedrock")]
+    const alias = providers[ProviderV2.ID.make("bedrock-alias")]
+    expect(base).toBeDefined()
+    expect(alias).toBeDefined()
+    expect(base.options.apiKey).toBe("base-bedrock-test-token")
+    expect(alias.options.apiKey).toBeUndefined()
+    expect(process.env.AWS_BEARER_TOKEN_BEDROCK).toBeUndefined()
+  }),
+  {
+    config: {
+      provider: {
+        "bedrock-alias": { npm: "@ai-sdk/amazon-bedrock", options: { region: "eu-west-1" } },
+      },
+    },
+  },
+)
+
+test("SAP saved service keys are never promoted to SDK-agnostic API keys", () => {
+  const provider = (id: string, baseProviderID?: string) => ({
+    id: ProviderV2.ID.make(id),
+    baseProviderID: baseProviderID ? ProviderV2.ID.make(baseProviderID) : undefined,
+    key: "synthetic-service-key",
+  }) as Provider.Info
+
+  expect(Provider.savedApiKeyForSDK(provider("sap-ai-core"))).toBeUndefined()
+  expect(Provider.savedApiKeyForSDK(provider("sap-alias", "sap-ai-core"))).toBeUndefined()
+  expect(Provider.savedApiKeyForSDK(provider("other-provider"))).toBe("synthetic-service-key")
+})
+
+test("SAP AI Core service key maps to per-instance OAuth2 destination", () => {
+  const key = JSON.stringify({
+    clientid: "synthetic-client-id",
+    clientsecret: "synthetic-client-secret",
+    url: "https://token.example.test/",
+    serviceurls: { AI_API_URL: "https://api.example.test" },
+  })
+  expect(Provider.sapAICoreDestination(key)).toEqual({
+    url: "https://api.example.test",
+    authentication: "OAuth2ClientCredentials",
+    clientId: "synthetic-client-id",
+    clientSecret: "synthetic-client-secret",
+    tokenServiceUrl: "https://token.example.test/oauth/token",
+  })
+  expect(() => Provider.sapAICoreDestination("not-json")).toThrow()
+  expect(() => Provider.sapAICoreDestination("{}")).toThrow()
+})
+
+it.instance(
+  "SAP AI Core aliases keep saved service keys out of options and process.env",
+  Effect.gen(function* () {
+    yield* remove("AICORE_SERVICE_KEY")
+    const baseSecret = JSON.stringify({
+      clientid: "base-id", clientsecret: "base-secret", url: "https://token.example.test",
+      serviceurls: { AI_API_URL: "https://base.example.test" },
+    })
+    const aliasSecret = JSON.stringify({
+      clientid: "alias-id", clientsecret: "alias-secret", url: "https://token.example.test",
+      serviceurls: { AI_API_URL: "https://alias.example.test" },
+    })
+    yield* setProcessEnv("OPENCODE_AUTH_CONTENT", JSON.stringify({
+      "sap-ai-core": { type: "api", key: baseSecret },
+      "sap-alias": { type: "api", key: aliasSecret },
+    }))
+    const providers = yield* list
+    const base = providers[ProviderV2.ID.make("sap-ai-core")]
+    const alias = providers[ProviderV2.ID.make("sap-alias")]
+    expect(base).toBeDefined()
+    expect(alias).toBeDefined()
+    expect(alias.baseProviderID).toBe(ProviderV2.ID.make("sap-ai-core"))
+    expect(process.env.AICORE_SERVICE_KEY).toBeUndefined()
+    expect(base.options.destination).toBeUndefined()
+    expect(alias.options.destination).toBeUndefined()
+    expect(base.options.clientSecret).toBeUndefined()
+    expect(alias.options.clientSecret).toBeUndefined()
+    expect(JSON.stringify(Provider.toPublicInfo(alias).options)).not.toContain("alias-secret")
+    expect(JSON.stringify(Provider.toPublicInfo(base).options)).not.toContain("base-secret")
+  }),
+  {
+    config: {
+      provider: {
+        "sap-alias": { npm: "@jerome-benoit/sap-ai-provider-v2" },
+      },
+    },
+  },
+)
+
+it.instance(
+  "SAP alias SDK override does not resolve SAP private destination",
+  Effect.gen(function* () {
+    yield* remove("AICORE_SERVICE_KEY")
+    yield* setProcessEnv(
+      "OPENCODE_AUTH_CONTENT",
+      JSON.stringify({ "sap-alias": { type: "api", key: "malformed-sap-service-key" } }),
+    )
+    const providers = yield* list
+    const alias = providers[ProviderV2.ID.make("sap-alias")]
+    expect(alias).toBeDefined()
+    expect(alias.baseProviderID).toBe(ProviderV2.ID.make("sap-ai-core"))
+    const model = alias.models["compat-switch"]
+    expect(model).toBeDefined()
+    expect(model.api.npm).toBe("@ai-sdk/openai-compatible")
+    expect(model.baseProviderID).toBeUndefined()
+    expect(yield* Provider.use.getLanguage(model)).toBeDefined()
+  }),
+  {
+    config: {
+      provider: {
+        "sap-alias": {
+          npm: "@jerome-benoit/sap-ai-provider-v2",
+          models: {
+            "compat-switch": {
+              provider: { npm: "@ai-sdk/openai-compatible", api: "https://example.test/v1" },
+              limit: { context: 8192, output: 1024 },
+            },
+          },
+        },
+      },
+    },
+  },
+)
+
 it.instance("provider loaded from env variable", () =>
   Effect.gen(function* () {
     yield* setProcessEnv("ANTHROPIC_API_KEY", "test-api-key")
@@ -175,6 +367,116 @@ it.instance(
     expect(models).not.toContain("claude-sonnet-4-20250514")
   }),
   { config: { provider: { anthropic: { blacklist: ["claude-sonnet-4-20250514"] } } } },
+)
+
+it.instance(
+  "config-only provider inherits built-in catalog and filtering",
+  Effect.gen(function* () {
+    const providerID = ProviderV2.ID.make("anthropic-alias")
+    const providers = yield* list
+    const provider = providers[providerID]
+    expect(provider).toBeDefined()
+    expect(provider.baseProviderID).toBe(ProviderV2.ID.anthropic)
+    expect(provider.options.apiKey).toBe("alias-key")
+    expect(Object.keys(provider.models)).toEqual(["claude-sonnet-4-6"])
+    expect(provider.models["claude-sonnet-4-6"].providerID).toBe(providerID)
+    expect(provider.models["claude-sonnet-4-6"].baseProviderID).toBe(ProviderV2.ID.anthropic)
+  }),
+  {
+    config: {
+      provider: {
+        "anthropic-alias": {
+          name: "Anthropic Alias",
+          npm: "@ai-sdk/anthropic",
+          whitelist: ["claude-sonnet-4-6"],
+          options: { apiKey: "alias-key" },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
+  "config-only OpenAI alias loads provider-specific options and respects per-model SDK overrides",
+  Effect.gen(function* () {
+    const alias = ProviderV2.ID.make("openai-alias")
+    const providers = yield* list
+    const provider = providers[alias]
+    expect(provider).toBeDefined()
+    expect(provider.baseProviderID).toBe(ProviderV2.ID.openai)
+    expect(provider.options.headerTimeout).toBe(300_000)
+    expect(provider.options.apiKey).toBe("alias-key")
+    const customModel = provider.models["compat-switch"]
+    expect(customModel).toBeDefined()
+    expect(customModel.baseProviderID).toBeUndefined()
+    expect(customModel.api.npm).toBe("@ai-sdk/openai-compatible")
+    expect(yield* Provider.use.getLanguage(customModel)).toBeDefined()
+  }),
+  {
+    config: {
+      provider: {
+        "openai-alias": {
+          npm: "@ai-sdk/openai",
+          options: { apiKey: "alias-key" },
+          models: {
+            "compat-switch": {
+              provider: { npm: "@ai-sdk/openai-compatible" },
+              limit: { context: 8192, output: 2048 },
+            },
+          },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
+  "OpenAI alias filters invalid chat-only models by base provider identity",
+  Effect.gen(function* () {
+    const providers = yield* list
+    const alias = providers[ProviderV2.ID.make("openai-alias")]
+    expect(alias).toBeDefined()
+    expect(alias.models["gpt-5-chat-latest"]).toBeUndefined()
+  }),
+  {
+    config: {
+      provider: {
+        "openai-alias": {
+          npm: "@ai-sdk/openai",
+          options: { apiKey: "alias-key" },
+          models: { "gpt-5-chat-latest": { name: "Chat Alias" } },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
+  "explicit model SDK override clears inherited model behavior",
+  Effect.gen(function* () {
+    const providerID = ProviderV2.ID.make("anthropic-alias")
+    const providers = yield* list
+    const provider = providers[providerID]
+    expect(provider.baseProviderID).toBe(ProviderV2.ID.anthropic)
+    expect(provider.models["custom-openai"].providerID).toBe(providerID)
+    expect(provider.models["custom-openai"].api.npm).toBe("@ai-sdk/openai-compatible")
+    expect(provider.models["custom-openai"].baseProviderID).toBeUndefined()
+  }),
+  {
+    config: {
+      provider: {
+        "anthropic-alias": {
+          npm: "@ai-sdk/anthropic",
+          models: {
+            "custom-openai": {
+              provider: { npm: "@ai-sdk/openai-compatible" },
+              limit: { context: 8192, output: 2048 },
+            },
+          },
+        },
+      },
+    },
+  },
 )
 
 it.instance(

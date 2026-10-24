@@ -31,6 +31,7 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { ModelStatus } from "./model-status"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderError } from "./error"
+import * as ProviderInheritance from "./inheritance"
 
 const OPENAI_HEADER_TIMEOUT_DEFAULT = 300_000
 
@@ -177,11 +178,18 @@ const BUNDLED_PROVIDERS: Record<string, () => Promise<(opts: any) => BundledSDK>
 type CustomModelLoader = (sdk: any, modelID: string, options?: Record<string, any>, model?: Model) => Promise<any>
 type CustomVarsLoader = (options: Record<string, any>) => Record<string, string>
 type CustomDiscoverModels = () => Promise<Record<string, Model>>
+type PrivateSDKOptions = {
+  npm: string
+  resolve: () => Record<string, any>
+}
+
 type CustomLoader = (provider: Info) => Effect.Effect<{
   autoload: boolean
   getModel?: CustomModelLoader
   vars?: CustomVarsLoader
   options?: Record<string, any>
+  // Private SDK options apply only to the intended npm package, never to model overrides.
+  sdkOptions?: PrivateSDKOptions
   discoverModels?: CustomDiscoverModels
 }>
 
@@ -206,6 +214,36 @@ function selectBedrockMantleLanguageModel(sdk: BundledSDK, modelID: string) {
   return sdk.responses?.(modelID) ?? sdk.languageModel(modelID)
 }
 
+// Convert SAP AI Core's JSON service key into per-instance SAP Cloud SDK credentials.
+// Keep the client secret out of provider catalog/options and process.env.
+export function sapAICoreDestination(raw: string) {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new Error("Invalid SAP AI Core service key JSON")
+  }
+  if (!isRecord(parsed) || !isRecord(parsed.serviceurls))
+    throw new Error("Invalid SAP AI Core service key structure")
+  const apiURL = parsed.serviceurls.AI_API_URL
+  const tokenURL = parsed.url
+  const clientId = parsed.clientid
+  const clientSecret = parsed.clientsecret
+  if (
+    typeof apiURL !== "string" || !apiURL ||
+    typeof tokenURL !== "string" || !tokenURL ||
+    typeof clientId !== "string" || !clientId ||
+    typeof clientSecret !== "string" || !clientSecret
+  ) throw new Error("SAP AI Core service key is missing required fields")
+  return {
+    url: apiURL,
+    authentication: "OAuth2ClientCredentials" as const,
+    clientId,
+    clientSecret,
+    tokenServiceUrl: `${tokenURL.replace(/\/+$/, "")}/oauth/token`,
+  }
+}
+
 function custom(dep: CustomDep): Record<string, CustomLoader> {
   return {
     anthropic: () =>
@@ -226,7 +264,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
       const ok =
         hasKey ||
         Boolean(yield* dep.auth(input.id)) ||
-        Boolean((yield* dep.config()).provider?.["opencode"]?.options?.apiKey)
+        Boolean((yield* dep.config()).provider?.[input.id]?.options?.apiKey)
 
       if (!ok) {
         for (const [key, value] of Object.entries(input.models)) {
@@ -333,9 +371,9 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         },
       }
     }),
-    "amazon-bedrock": Effect.fnUntraced(function* () {
-      const providerConfig = (yield* dep.config()).provider?.["amazon-bedrock"]
-      const auth = yield* dep.auth("amazon-bedrock")
+    "amazon-bedrock": Effect.fnUntraced(function* (input: Info) {
+      const providerConfig = (yield* dep.config()).provider?.[input.id]
+      const auth = yield* dep.auth(input.id)
       const env = yield* dep.env()
 
       // Region precedence: 1) config file, 2) env var, 3) default
@@ -351,17 +389,12 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
       const awsAccessKeyId = env["AWS_ACCESS_KEY_ID"]
       const configApiKey = providerConfig?.options?.apiKey
 
-      // TODO: Using process.env directly because Env.set only updates a process.env shallow copy,
-      // until the scope of the Env API is clarified (test only or runtime?)
-      const awsBearerToken = iife(() => {
-        const envToken = process.env.AWS_BEARER_TOKEN_BEDROCK
-        if (envToken) return envToken
-        if (auth?.type === "api") {
-          process.env.AWS_BEARER_TOKEN_BEDROCK = auth.key
-          return auth.key
-        }
-        return undefined
-      })
+      // Never publish an auth.json token to process.env. SDK instances accept
+      // an explicit apiKey; an inherited alias must keep its own saved token.
+      // The original built-in provider retains environment-before-stored precedence.
+      const envToken = process.env.AWS_BEARER_TOKEN_BEDROCK
+      const savedToken = auth?.type === "api" ? auth.key : undefined
+      const awsBearerToken = input.baseProviderID ? (savedToken ?? envToken) : (envToken ?? savedToken)
 
       const awsWebIdentityTokenFile = env["AWS_WEB_IDENTITY_TOKEN_FILE"]
 
@@ -383,6 +416,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
 
       const providerOptions: Record<string, any> = {
         region: defaultRegion,
+        ...(awsBearerToken ? { apiKey: awsBearerToken } : {}),
       }
 
       // Only use credential chain if no bearer token exists
@@ -612,25 +646,30 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         },
       }
     }),
-    "sap-ai-core": Effect.fnUntraced(function* () {
-      const auth = yield* dep.auth("sap-ai-core")
-      // TODO: Using process.env directly because Env.set only updates a shallow copy (not process.env),
-      // until the scope of the Env API is clarified (test only or runtime?)
-      const envServiceKey = iife(() => {
-        const envAICoreServiceKey = process.env.AICORE_SERVICE_KEY
-        if (envAICoreServiceKey) return envAICoreServiceKey
-        if (auth?.type === "api") {
-          process.env.AICORE_SERVICE_KEY = auth.key
-          return auth.key
-        }
-        return undefined
-      })
+    "sap-ai-core": Effect.fnUntraced(function* (input: Info) {
+      const auth = yield* dep.auth(input.id)
+      const savedKey = auth?.type === "api" ? auth.key : undefined
+      const envKey = process.env.AICORE_SERVICE_KEY
+      // The built-in provider retains environment precedence; aliases with an
+      // explicitly saved service key use their own key instead of the shared env.
+      const useSaved = Boolean(savedKey && (input.baseProviderID || !envKey))
+      const available = Boolean(savedKey || envKey)
       const deploymentId = process.env.AICORE_DEPLOYMENT_ID
       const resourceGroup = process.env.AICORE_RESOURCE_GROUP
 
       return {
-        autoload: !!envServiceKey,
-        options: envServiceKey ? { deploymentId, resourceGroup } : {},
+        autoload: available,
+        options: available ? { deploymentId, resourceGroup } : {},
+        // SAP SDK supports an explicit per-instance destination. Do not write
+        // auth.json service keys into process.env or public provider options.
+        // Delay malformed-key errors until this model is requested, rather than
+        // failing provider initialization for unrelated providers.
+        sdkOptions: useSaved && savedKey
+          ? {
+              npm: "@jerome-benoit/sap-ai-provider-v2",
+              resolve: () => ({ destination: sapAICoreDestination(savedKey) }),
+            }
+          : undefined,
         async getModel(sdk: any, modelID: string) {
           return sdk(modelID)
         },
@@ -659,7 +698,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
       const apiKey = auth?.type === "oauth" ? auth.access : auth?.type === "api" ? auth.key : undefined
       const token = apiKey ?? (yield* dep.get("GITLAB_TOKEN"))
 
-      const providerConfig = (yield* dep.config()).provider?.["gitlab"]
+      const providerConfig = (yield* dep.config()).provider?.[input.id]
       const directory = yield* InstanceState.directory
 
       const aiGatewayHeaders = {
@@ -1129,6 +1168,7 @@ const ProviderLimit = Schema.Struct({
 export const Model = Schema.Struct({
   id: ModelV2.ID,
   providerID: ProviderV2.ID,
+  baseProviderID: optional(ProviderV2.ID),
   api: ProviderApiInfo,
   name: Schema.String,
   family: optional(Schema.String),
@@ -1145,6 +1185,7 @@ export type Model = Types.DeepMutable<Schema.Schema.Type<typeof Model>>
 
 export const Info = Schema.Struct({
   id: ProviderV2.ID,
+  baseProviderID: optional(ProviderV2.ID),
   name: Schema.String,
   source: Schema.Literals(["env", "config", "custom", "api"]),
   env: Schema.Array(Schema.String),
@@ -1168,6 +1209,14 @@ export const ConfigProvidersResult = Schema.Struct({
   default: DefaultModelIDs,
 })
 export type ConfigProvidersResult = Types.DeepMutable<Schema.Schema.Type<typeof ConfigProvidersResult>>
+
+// SAP service keys authenticate via the SAP SDK's environment or private destination.
+// They must not be reused as generic API keys by a model-level SDK override.
+export function savedApiKeyForSDK(provider: Info): string | undefined {
+  return ProviderInheritance.baseProviderID(provider) === ProviderV2.ID.make("sap-ai-core")
+    ? undefined
+    : provider.key
+}
 
 export function toPublicInfo(provider: Info): Info {
   return JSON.parse(
@@ -1263,6 +1312,7 @@ interface State {
   sdk: Map<string, BundledSDK>
   modelLoaders: Record<string, CustomModelLoader>
   varsLoaders: Record<string, CustomVarsLoader>
+  sdkOptions: Record<string, PrivateSDKOptions>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Provider") {}
@@ -1464,6 +1514,7 @@ const layer = Layer.effect(
         const varsLoaders: {
           [providerID: string]: CustomVarsLoader
         } = {}
+        const sdkOptions: Record<string, PrivateSDKOptions> = {}
         const sdk = new Map<string, BundledSDK>()
         const discoveryLoaders: {
           [providerID: string]: CustomDiscoverModels
@@ -1502,31 +1553,72 @@ const layer = Layer.effect(
           return true
         }
 
+        // A config-only provider can inherit a built-in provider catalog from
+        // its SDK package. Canonical @ai-sdk/<provider> packages prefer the
+        // matching built-in provider ID; other packages fall back to unique
+        // npm matching. Config models remain sparse overrides/additions, and
+        // whitelist/blacklist filtering is applied to the inherited result.
+        for (const [id, provider] of configProviders) {
+          const providerID = ProviderV2.ID.make(id)
+          const base = ProviderInheritance.inferBaseProviderID({
+            providerID,
+            provider,
+            catalog: modelsDev,
+          })
+          if (!base) continue
+
+          const baseProviderID = ProviderV2.ID.make(base)
+          const source = database[baseProviderID]
+          if (!source) continue
+
+          const inherited = toPublicInfo(source)
+          inherited.id = providerID
+          inherited.baseProviderID = baseProviderID
+          inherited.name = provider.name ?? id
+          inherited.source = "config"
+          inherited.env = provider.env ?? []
+          delete inherited.key
+          inherited.options = mergeDeep(source.options ?? {}, provider.options ?? {})
+          inherited.models = mapValues(inherited.models, (model) => ({
+            ...model,
+            providerID,
+            baseProviderID,
+          }))
+          database[providerID] = inherited
+        }
+
+        function providersFor(baseProviderID: ProviderV2.ID): Info[] {
+          return Object.values(database).filter(
+            (provider) => ProviderInheritance.baseProviderID(provider) === baseProviderID,
+          )
+        }
+
         for (const hook of plugins) {
           const p = hook.provider
           const models = p?.models
           if (!p || !models) continue
 
-          const providerID = ProviderV2.ID.make(p.id)
-          if (disabled.has(providerID)) continue
+          const baseProviderID = ProviderV2.ID.make(p.id)
+          for (const provider of providersFor(baseProviderID)) {
+            const providerID = provider.id
+            if (!isProviderAllowed(providerID)) continue
+            const pluginAuth = yield* auth.get(providerID).pipe(Effect.orDie)
 
-          const provider = database[providerID]
-          if (!provider) continue
-          const pluginAuth = yield* auth.get(providerID).pipe(Effect.orDie)
-
-          provider.models = yield* Effect.promise(async () => {
-            const next = await models(toPublicInfo(provider), { auth: pluginAuth })
-            return Object.fromEntries(
-              Object.entries(next).map(([id, model]) => [
-                id,
-                {
-                  ...model,
-                  id: ModelV2.ID.make(id),
-                  providerID,
-                },
-              ]),
-            )
-          })
+            provider.models = yield* Effect.promise(async () => {
+              const next = await models(toPublicInfo(provider), { auth: pluginAuth })
+              return Object.fromEntries(
+                Object.entries(next).map(([id, model]) => [
+                  id,
+                  {
+                    ...model,
+                    id: ModelV2.ID.make(id),
+                    providerID,
+                    baseProviderID: provider.baseProviderID,
+                  },
+                ]),
+              )
+            })
+          }
         }
 
         // extend database from config
@@ -1534,6 +1626,7 @@ const layer = Layer.effect(
           const existing = database[providerID]
           const parsed: Info = {
             id: ProviderV2.ID.make(providerID),
+            baseProviderID: existing?.baseProviderID,
             name: provider.name ?? existing?.name ?? providerID,
             env: provider.env ?? existing?.env ?? [],
             options: mergeDeep(existing?.options ?? {}, provider.options ?? {}),
@@ -1560,6 +1653,11 @@ const layer = Layer.effect(
             })
             const parsedModel: Model = {
               id: ModelV2.ID.make(modelID),
+              providerID: ProviderV2.ID.make(providerID),
+              baseProviderID:
+                existing?.baseProviderID && apiNpm === (provider.npm ?? existingModel?.api.npm)
+                  ? existing.baseProviderID
+                  : undefined,
               api: {
                 id: apiID,
                 npm: apiNpm,
@@ -1567,7 +1665,6 @@ const layer = Layer.effect(
               },
               status: model.status ?? existingModel?.status ?? "active",
               name,
-              providerID: ProviderV2.ID.make(providerID),
               capabilities: {
                 temperature: model.temperature ?? existingModel?.capabilities.temperature ?? false,
                 reasoning: model.reasoning ?? existingModel?.capabilities.reasoning ?? false,
@@ -1659,42 +1756,50 @@ const layer = Layer.effect(
           }
         }
 
-        // plugin auth loader - database now has entries for config providers
+        // Plugin auth and custom provider loaders are inherited by aliases.
+        // Credentials are still resolved by the alias ID, so provider behavior
+        // can be shared without sharing auth state.
         for (const plugin of plugins) {
-          if (!plugin.auth) continue
-          const providerID = ProviderV2.ID.make(plugin.auth.provider)
-          if (disabled.has(providerID)) continue
+          if (!plugin.auth?.loader) continue
+          const baseProviderID = ProviderV2.ID.make(plugin.auth.provider)
 
-          const stored = yield* auth.get(providerID).pipe(Effect.orDie)
-          if (!stored) continue
-          if (!plugin.auth.loader) continue
+          for (const data of providersFor(baseProviderID)) {
+            const providerID = data.id
+            if (!isProviderAllowed(providerID)) continue
 
-          const options = yield* Effect.promise(() =>
-            plugin.auth!.loader!(
-              () => bridge.promise(auth.get(providerID).pipe(Effect.orDie)) as any,
-              toPublicInfo(database[plugin.auth!.provider]),
-            ),
-          )
-          const opts = options ?? {}
-          const patch: Partial<Info> = providers[providerID] ? { options: opts } : { source: "custom", options: opts }
-          mergeProvider(providerID, patch)
+            const stored = yield* auth.get(providerID).pipe(Effect.orDie)
+            if (!stored) continue
+
+            const options = yield* Effect.promise(() =>
+              plugin.auth!.loader!(
+                () => bridge.promise(auth.get(providerID).pipe(Effect.orDie)) as any,
+                toPublicInfo(data),
+              ),
+            )
+            const opts = options ?? {}
+            const patch: Partial<Info> = providers[providerID] ? { options: opts } : { source: "custom", options: opts }
+            mergeProvider(providerID, patch)
+          }
         }
 
         for (const [id, fn] of Object.entries(custom(dep))) {
-          const providerID = ProviderV2.ID.make(id)
-          if (disabled.has(providerID)) continue
-          const data = database[providerID]
-          if (!data) {
-            continue
-          }
-          const result = yield* fn(data)
-          if (result && (result.autoload || providers[providerID])) {
-            if (result.getModel) modelLoaders[providerID] = result.getModel
-            if (result.vars) varsLoaders[providerID] = result.vars
-            if (result.discoverModels) discoveryLoaders[providerID] = result.discoverModels
-            const opts = result.options ?? {}
-            const patch: Partial<Info> = providers[providerID] ? { options: opts } : { source: "custom", options: opts }
-            mergeProvider(providerID, patch)
+          const baseProviderID = ProviderV2.ID.make(id)
+          for (const data of providersFor(baseProviderID)) {
+            const providerID = data.id
+            if (!isProviderAllowed(providerID)) continue
+
+            const result = yield* fn(data)
+            const configuredAlias = data.baseProviderID === baseProviderID &&
+              Object.hasOwn(cfg.provider ?? {}, providerID)
+            if (result && (result.autoload || providers[providerID] || configuredAlias)) {
+              if (result.getModel) modelLoaders[providerID] = result.getModel
+              if (result.vars) varsLoaders[providerID] = result.vars
+              if (result.sdkOptions) sdkOptions[providerID] = result.sdkOptions
+              if (result.discoverModels) discoveryLoaders[providerID] = result.discoverModels
+              const opts = result.options ?? {}
+              const patch: Partial<Info> = providers[providerID] ? { options: opts } : { source: "custom", options: opts }
+              mergeProvider(providerID, patch)
+            }
           }
         }
 
@@ -1733,15 +1838,16 @@ const layer = Layer.effect(
 
           for (const [modelID, model] of Object.entries(provider.models)) {
             model.api.id = model.api.id ?? model.id ?? modelID
+            const behaviorProviderID = ProviderInheritance.baseProviderID(model) ?? providerID
 
             if (
               // These chat aliases are invalid for the special handling in the
               // built-in providers below, but custom providers may support them.
               (modelID === "gpt-5-chat-latest" &&
-                (providerID === ProviderV2.ID.openai ||
-                  providerID === ProviderV2.ID.githubCopilot ||
-                  providerID === ProviderV2.ID.openrouter)) ||
-              (providerID === ProviderV2.ID.openrouter && modelID === "openai/gpt-5-chat")
+                (behaviorProviderID === ProviderV2.ID.openai ||
+                  behaviorProviderID === ProviderV2.ID.githubCopilot ||
+                  behaviorProviderID === ProviderV2.ID.openrouter)) ||
+              (behaviorProviderID === ProviderV2.ID.openrouter && modelID === "openai/gpt-5-chat")
             )
               delete provider.models[modelID]
             if (model.status === "alpha" && !runtimeFlags.enableExperimentalModels) delete provider.models[modelID]
@@ -1779,6 +1885,7 @@ const layer = Layer.effect(
           sdk,
           modelLoaders,
           varsLoaders,
+          sdkOptions,
         }
       }),
     )
@@ -1788,10 +1895,14 @@ const layer = Layer.effect(
     async function resolveSDK(model: Model, s: State, envs: Record<string, string | undefined>) {
       try {
         const provider = s.providers[model.providerID]
-        const options = { ...provider.options }
+        const privateOptions = s.sdkOptions[model.providerID]
+        const options = {
+          ...provider.options,
+          ...(privateOptions?.npm === model.api.npm ? privateOptions.resolve() : {}),
+        }
 
         if (
-          model.providerID === "google-vertex" &&
+          ProviderInheritance.isProvider(model, "google-vertex") &&
           model.api.npm === "@ai-sdk/google-vertex/anthropic" &&
           !options.baseURL
         ) {
@@ -1802,7 +1913,7 @@ const layer = Layer.effect(
           if (baseURL) options.baseURL = baseURL
         }
 
-        if (model.providerID === "google-vertex" && !model.api.npm.includes("@ai-sdk/openai-compatible")) {
+        if (ProviderInheritance.isProvider(model, "google-vertex") && !model.api.npm.includes("@ai-sdk/openai-compatible")) {
           delete options.fetch
         }
 
@@ -1832,7 +1943,8 @@ const layer = Layer.effect(
         })
 
         if (baseURL !== undefined) options["baseURL"] = baseURL
-        if (options["apiKey"] === undefined && provider.key) options["apiKey"] = provider.key
+        const savedApiKey = savedApiKeyForSDK(provider)
+        if (options["apiKey"] === undefined && savedApiKey) options["apiKey"] = savedApiKey
         if (model.headers)
           options["headers"] = {
             ...options["headers"],
@@ -1928,7 +2040,9 @@ const layer = Layer.effect(
       return yield* EffectPromise.refineRejection(
         async () => {
           const sdk = await resolveSDK(model, s, envs)
-          const language = s.modelLoaders[model.providerID]
+          const useCustomLoader = Boolean(s.modelLoaders[model.providerID]) &&
+            (!provider.baseProviderID || model.baseProviderID === provider.baseProviderID)
+          const language = useCustomLoader
             ? await s.modelLoaders[model.providerID](
                 sdk,
                 model.api.id,
@@ -1989,13 +2103,14 @@ const layer = Layer.effect(
       }
 
       // TODO: Remove these provider-specific assumptions once model syncing reliably reports available deployments.
-      if (providerID === ProviderV2.ID.azure || providerID === ProviderV2.ID.make("azure-cognitive-services")) {
+      const baseProviderID = ProviderInheritance.baseProviderID(provider) ?? providerID
+      if (baseProviderID === ProviderV2.ID.azure || baseProviderID === ProviderV2.ID.make("azure-cognitive-services")) {
         return undefined
       }
 
-      const priority = providerID.startsWith("opencode")
+      const priority = baseProviderID.startsWith("opencode")
         ? ["gpt-nano"]
-        : providerID.startsWith("github-copilot")
+        : baseProviderID.startsWith("github-copilot")
           ? ["gpt-mini", ...smallModelFamilyPriority]
           : smallModelFamilyPriority
       const models = sortBy(

@@ -165,7 +165,7 @@ upstream/dev
 git log --oneline --decorate -20 upstream/dev | cat
 ```
 
-這只顯示本機已有的 reference，不保證是 upstream 最新的 commit。在 Section 16.1 的 tag-fetch policy 修正前，不要為了更新這項觀察而執行未限定 refspec 的 `git fetch upstream`。
+這只顯示本機已有的 reference，不保證是 upstream 最新的 commit。在 Section 16.3 的 tag-fetch policy 修正前，不要為了更新這項觀察而執行未限定 refspec 的 `git fetch upstream`。
 
 不需要：
 
@@ -461,7 +461,7 @@ Upstream published stable release 的權威是 GitHub Releases metadata，不是
 
 此 checker 的安全修改**不會改變** `main:sky-tools/setup-local-repo.sh` 及 `main:sky-tools/check-release.sh`。後者仍可能因既有 upstream tag refspec 在 fetch 時重新取得大量本機 tags；兩者屬 repository-level policy，應在獨立任務 review 後調整。本 release branch checker 的 read-only 設計不表示 global fetch policy 已修正。
 
-在 repository-level fetch policy 調整前，不要將未限定 refspec 的 `git fetch upstream` 當成例行版本觀察。本機 `upstream/dev` 可用於查看最後一次已取得的開發參考，但不代表最新狀態。詳細界線見 Section 16.1。
+在 repository-level fetch policy 調整前，不要將未限定 refspec 的 `git fetch upstream` 當成例行版本觀察。本機 `upstream/dev` 可用於查看最後一次已取得的開發參考，但不代表最新狀態。詳細界線見 Section 16.3。
 
 Stable release branch 不得 merge、rebase 或 pull `upstream/dev`。
 
@@ -479,7 +479,7 @@ latest upstream stable
 currently adopted Sky release
 ```
 
-依目前 fetch policy，未限定 refspec 的 `git fetch upstream` 也會重新取得大量 upstream tags。在 Section 16.1 修正前，不應將其當作例行 release observation。除非 Sky 明確決定採用新版，否則不要：
+依目前 fetch policy，未限定 refspec 的 `git fetch upstream` 也會重新取得大量 upstream tags。在 Section 16.3 修正前，不應將其當作例行 release observation。除非 Sky 明確決定採用新版，否則不要：
 
 - 建立新的 `sky/vX.Y.Z` branch。
 - 修改目前 adopted release。
@@ -536,7 +536,7 @@ git fetch --no-tags upstream \
 git show-ref --verify refs/tags/v1.19.4
 ```
 
-此範例只針對 `v1.19.4`；未來採用其他 release 時須重新驗證並調整版本。這不代表 Section 16.1 的共用 fetch policy 已修正。
+此範例只針對 `v1.19.4`；未來採用其他 release 時須重新驗證並調整版本。這不代表 Section 16.3 的共用 fetch policy 已修正。
 
 tag 不存在就停止，不要自行建立官方同名 tag。
 
@@ -1015,7 +1015,169 @@ git log \
 
 後續功能修改使用獨立 commits。
 
-### 16.1 Deferred: Repository-Level Tag Fetch and Local Retention
+### 16.1 Product Patch: Provider Inheritance
+
+本 release 的 provider inheritance product patch 由 R6 移植，並保留官方 `v1.19.4` 的 `reasoning_options` 行為。此候選已在隔離 Bun 1.4.4 環境通過五組 targeted tests、兩項 typecheck 及 Linux x64 build；實際 commit 與部署狀態應另依 Git history 和目標環境確認。
+
+此 patch 的目的不是保存特定 machine 的 provider inventory，而是提供一個通用機制，讓 **config-only provider ID** 可以重用 built-in provider 的 catalog 與 provider-specific behavior，同時保持自己的 runtime / auth identity。
+
+核心 identity boundary：
+
+```text
+provider.id
+└── config / runtime / auth namespace
+
+provider.baseProviderID
+└── inherited catalog / provider behavior identity
+```
+
+兩者不能混為同一個 namespace。
+
+Base provider 的推導規則：
+
+1. 如果 config provider ID 本身已存在於 built-in catalog，不建立 inheritance。
+2. `npm` 為 canonical `@ai-sdk/<provider>` 時，若 catalog 中存在同名 provider 且 `npm` 完全一致，優先繼承該 provider。
+3. 其他 package 只有在 `npm` **唯一對應**一個 built-in catalog provider 時才允許 inheritance。
+4. 無法唯一、確定地推導 base provider 時，不猜測、不 inheritance。
+
+目前這顆 patch 沿著需要 alias-safe 的主要 provider paths 傳遞 base identity：
+
+```text
+built-in provider catalog / model metadata
+provider model hooks
+plugin auth loaders
+custom provider loaders
+selected provider-specific transforms
+selected LLM runtime behavior
+```
+
+這是 **current patch coverage**，不是「所有 source 內只要比較 provider ID 就會自動 inheritance」的全域保證。OpenCode 未來仍可能新增或保留 raw provider-ID branch；migration / source edit 時必須重新 audit 與目前功能相關的 provider-specific checks，不能只因 `baseProviderID` 已存在就假設所有 path 都 alias-safe。
+
+Alias 自己仍負責：
+
+```text
+provider ID
+credential / auth storage key
+config options
+model sparse overrides / additions
+whitelist / blacklist
+```
+
+因此：
+
+- inherited models 會重新綁定到 alias provider ID，同時保留 `baseProviderID` 供 provider-specific logic 判斷；
+- config `models` 應優先作為 sparse override / addition，而不是複製完整 built-in model metadata；
+- `whitelist` / `blacklist` 在 inheritance 後限制 alias 最終暴露的 model set；
+- config options 可以覆寫 inherited provider options；
+- 若 explicit model 改用與 inherited provider 不同的 SDK package，不應保留錯誤的 base-provider behavior；
+- auth lookup、OAuth/API credential 與 refresh persistence 必須以 alias provider ID 為 namespace，不可 fallback 或寫回 base provider credential；
+- plugin 需要持久化更新 auth state 時，必須使用實際 runtime provider ID，而不是 hard-code plugin 的 built-in provider ID。
+
+Plugin auth login discovery 也沿用 inherited base provider。若 alias 繼承的 base provider 提供 interactive / OAuth login hook，CLI 可以在 alias ID 下暴露同一個 login flow。
+
+這個 login flow **不是 read-only**：
+
+- 完成 login 後，新的 credential 會寫回該 alias 自己的 auth namespace；
+- 不會 fallback、覆寫或共用 base provider 的 credential；
+- 但如果 alias 原本已保存另一種 credential type，例如 API credential，完成 OAuth login 可能會以新的 OAuth credential 取代該 alias 原本的 credential entry；
+- 因此在 inherited alias 上執行 plugin auth login 前，必須先確認「替換該 alias 現有 credential type」是刻意操作，而不是單純想查看或測試 login capability。
+
+這是目前 generic auth inheritance 的 operator-facing behavior。若未來需要讓「catalog / provider behavior inheritance」與「interactive auth login inheritance」可以獨立控制，應新增明確的 auth-inheritance policy，而不是依賴 alias naming convention 或 machine-specific 特判。
+
+Implementation entry point：
+
+```text
+packages/opencode/src/provider/inheritance.ts
+```
+
+實際 behavior 會跨 provider construction、auth、CLI login、plugin hooks、transforms 與 LLM runtime。Migration 時應以該 product patch 的 commit diff 與 target release source 為完整 review inventory，不要把目前 touched-file list 當成 future release 的固定 allowlist；也要搜尋 target source 中與 base provider 有關的 raw `providerID` / `provider.id` / provider-name checks，逐項判斷是否需要改用 effective base identity、是否必須保留原本 exact / prefix / substring matching semantics，或是否刻意只適用 built-in provider。
+
+Public source / documentation 只描述 generic mechanism 與 maintenance contract。Machine-specific provider alias、model inventory、endpoint 與 credential 不屬於這個 public product patch。
+
+#### Migration / removal decision
+
+採用新的 official release 時，除了 Section 11 的一般 patch review，這顆 patch 必須另外確認 upstream 是否已提供等價能力：
+
+```text
+config-only provider inheritance / aliasing
+catalog and model metadata inheritance
+provider/plugin behavior inheritance
+independent alias auth namespace
+alias-safe credential refresh persistence
+required provider-specific runtime / transform behavior
+raw provider-ID checks reviewed for alias compatibility without narrowing upstream semantics
+```
+
+判斷：
+
+```text
+DROP
+└── upstream 已完整提供等價 contract
+
+MODIFY
+└── upstream 只提供部分能力，或 internal provider / plugin contract 已改變
+
+KEEP
+└── target release 仍缺少此能力，且 patch 經 target source review 後仍相容
+
+NEEDS_REVIEW
+└── 無法從 target source / behavior 確認
+```
+
+不要只因 cherry-pick 無 conflict 或 typecheck 成功就判定可直接 KEEP。
+
+#### Functional validation
+
+除 Section 13 baseline 外，修改或 migration 此 patch 時至少驗證：
+
+```text
+unfiltered alias
+└── inherited model inventory 符合 base provider
+
+restricted alias
+└── whitelist / blacklist 正確限制 inherited catalog
+
+runtime routing
+├── base provider path 可用
+├── inherited alias path 可用
+└── API / custom endpoint override 仍使用 alias 自己的 transport/config
+
+credential isolation
+├── alias credential 不依賴 base credential
+└── auth refresh / persistence 寫回 alias namespace
+
+auth login discovery
+├── inherited login flow 以 alias ID 暴露
+├── successful login 只寫回 alias credential namespace
+└── 若 credential type 會被替換，該替換必須是刻意操作
+
+regression
+└── unrelated built-in providers / plugin paths 沒有因 base identity 判斷而改變行為
+```
+
+若 provider 使用可 refresh 的 auth，credential-isolation smoke test 應在不輸出 credential 本身的前提下，暫時使 base credential 不可用並確認 alias 仍可獨立運作；測試後恢復原 auth state。
+
+驗證紀錄只保留 durable contract；某次 migration 的 exact commands、PASS output 與具體 provider/model smoke results 放在該 logical change 的 commit message，不在本節累積 chronological transcript。
+
+### 16.2 Removed Product Patch: GPT-6 Sol / Luna Codex OAuth Backport
+
+`sky/v1.18.32` 曾以 local patch 加入 GPT-6 Sol / Luna
+的 Codex OAuth allowlist 支援。
+
+`v1.19.4` 的 upstream `packages/opencode/src/plugin/openai/codex.ts`
+及相應 tests 已包含等價功能，因此此 patch 判定為 DROP，
+不得再次 cherry-pick。
+
+歷史 patch 保留於 `sky/v1.18.32`。此項移除不改變
+Section 16.1 所定義的 provider identity 與 credential
+isolation contract。
+
+Functional validation 仍須涵蓋原生 OpenAI OAuth、
+inherited OpenAI OAuth alias、適用的 GPT-6 model filtering
+及可執行的 runtime request。Model listing 不等於
+end-to-end request 已成功。
+
+### 16.3 Deferred: Repository-Level Tag Fetch and Local Retention
 
 **現行界線：** 本 release branch 的 `sky-tools/check-release.sh` 改用遠端唯讀 release observation，已在 home 驗證能取得官方 published release，且執行前後 Git refs、index、設定與 source 不變。`main` 上的 `check-release.sh` 及 `setup-local-repo.sh` 未修改，repository-level upstream fetch 與 tag retention policy 仍待獨立審查。
 
@@ -1164,6 +1326,18 @@ documented commands
 
 重現。
 
+### Rule 12 — Provider inheritance 依 Section 16.1
+
+修改、review 或 migration provider-inheritance product patch 時，先讀 Section 16.1 的 identity boundary、migration / removal decision 與 functional validation。
+
+不要把 machine-specific provider alias、model inventory、endpoint 或 credential 寫進 public product source / documentation。
+
+### Rule 13 — 已 upstream 的 Codex backport 依 Section 16.2
+
+v1.19.4 已包含對應 Sol / Luna Codex OAuth allowlist 及 tests；不得再次移植已移除的 local backport。
+
+不要把 model list 可見性當成完整 runtime validation；具備 entitlement 時仍需做實際 request smoke test。
+
 ---
 
 ## 18. Quick Reference
@@ -1241,8 +1415,8 @@ packages/opencode/dist/opencode-linux-x64/bin/opencode --version
 git status
 ```
 
-這是驗證步驟，不表示已實際執行通過。功能專屬驗證需依實際
-local product patch 的行為契約補充。
+這是驗證步驟，不表示已實際執行通過。Provider inheritance 仍需
+依 Section 16.1 完成 source review 與 functional validation。
 
 Commit、release publication 與 origin archive 操作，應在各階段
 review 與驗證後分別處理。

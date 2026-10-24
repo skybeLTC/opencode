@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test"
-import { resolvePluginProviders } from "../../src/cli/cmd/providers"
+import { credentialStorageProviderID, resolveLoginAuthHook, resolvePluginProviders } from "../../src/cli/cmd/providers"
 import type { Hooks } from "@opencode-ai/plugin"
 
 function hookWithAuth(provider: string): Hooks {
@@ -108,6 +108,18 @@ describe("resolvePluginProviders", () => {
     expect(result).toEqual([{ id: "portkey", name: "portkey" }])
   })
 
+  test("includes configured aliases for inherited plugin auth", () => {
+    const result = resolvePluginProviders({
+      hooks: [hookWithAuth("openai")],
+      existingProviders: { openai: {} },
+      configuredProviders: { "openai-alias": { npm: "@ai-sdk/openai", name: "OpenAI Alias" } },
+      catalogProviders: { openai: { npm: "@ai-sdk/openai" } },
+      disabled: new Set(),
+      providerNames: { "openai-alias": "OpenAI Alias" },
+    })
+    expect(result).toEqual([{ id: "openai-alias", name: "OpenAI Alias" }])
+  })
+
   test("returns empty for no hooks", () => {
     const result = resolvePluginProviders({
       hooks: [],
@@ -116,5 +128,27 @@ describe("resolvePluginProviders", () => {
       providerNames: {},
     })
     expect(result).toEqual([])
+  })
+})
+
+
+describe("inherited plugin authentication identity", () => {
+  test("alias stays in its own auth namespace even when hook redirects", () => {
+    expect(credentialStorageProviderID("custom-alias", "digitalocean", "digitalocean")).toBe("custom-alias")
+    expect(credentialStorageProviderID("custom-alias", "openai", undefined)).toBe("custom-alias")
+  })
+
+  test("built-in plugin credential redirect behavior stays unchanged", () => {
+    expect(credentialStorageProviderID("digitalocean", "digitalocean", "target-provider")).toBe("target-provider")
+    expect(credentialStorageProviderID("digitalocean", "digitalocean", undefined)).toBe("digitalocean")
+  })
+
+  test("exact auth hook wins and hook-less plugins cannot shadow inherited auth", () => {
+    const exact = hookWithAuth("custom-alias")
+    const base = hookWithAuth("openai")
+    const hooks = [exact, base, hookWithoutAuth()]
+    expect(resolveLoginAuthHook(hooks, "custom-alias", "openai")).toBe(exact)
+    expect(resolveLoginAuthHook([base, hookWithoutAuth()], "custom-alias", "openai")).toBe(base)
+    expect(resolveLoginAuthHook([base, hookWithoutAuth()], "unrelated")).toBeUndefined()
   })
 })

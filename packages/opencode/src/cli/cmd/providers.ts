@@ -17,8 +17,18 @@ import { Process } from "@/util/process"
 import { errorMessage } from "@/util/error"
 import { text } from "node:stream/consumers"
 import { Effect, Option } from "effect"
+import * as ProviderInheritance from "@/provider/inheritance"
 
 type PluginAuth = NonNullable<Hooks["auth"]>
+
+export function credentialStorageProviderID(selected: string, hookProvider: string, redirected?: string): string {
+  return selected === hookProvider ? (redirected ?? selected) : selected
+}
+
+export function resolveLoginAuthHook(hooks: Hooks[], selected: string, inherited?: string): Hooks | undefined {
+  return hooks.findLast((hook) => hook.auth?.provider === selected) ??
+    (inherited ? hooks.findLast((hook) => hook.auth?.provider === inherited) : undefined)
+}
 
 const promptValue = <Value>(value: Option.Option<Value>) => {
   if (Option.isNone(value)) return Effect.die(new UI.CancelledError())
@@ -110,7 +120,7 @@ const handlePluginAuth = Effect.fn("Cli.providers.pluginAuth")(function* (
         yield* spinner.stop("Failed to authorize", 1)
       }
       if (result.type === "success") {
-        const saveProvider = result.provider ?? provider
+        const saveProvider = credentialStorageProviderID(provider, plugin.auth.provider, result.provider)
         if ("refresh" in result) {
           const { type: _, provider: __, refresh, access, expires, ...extraFields } = result
           yield* put(saveProvider, {
@@ -143,7 +153,7 @@ const handlePluginAuth = Effect.fn("Cli.providers.pluginAuth")(function* (
         yield* Prompt.log.error("Failed to authorize")
       }
       if (result.type === "success") {
-        const saveProvider = result.provider ?? provider
+        const saveProvider = credentialStorageProviderID(provider, plugin.auth.provider, result.provider)
         if ("refresh" in result) {
           const { type: _, provider: __, refresh, access, expires, ...extraFields } = result
           yield* put(saveProvider, {
@@ -193,7 +203,7 @@ const handlePluginAuth = Effect.fn("Cli.providers.pluginAuth")(function* (
       yield* Prompt.log.error("Failed to authorize")
     }
     if (result.type === "success") {
-      const saveProvider = result.provider ?? provider
+      const saveProvider = credentialStorageProviderID(provider, plugin.auth.provider, result.provider)
       const merged = { ...(metadata.metadata ?? {}), ...(result.metadata ?? {}) }
       yield* put(saveProvider, {
         type: "api",
@@ -212,6 +222,8 @@ const handlePluginAuth = Effect.fn("Cli.providers.pluginAuth")(function* (
 export function resolvePluginProviders(input: {
   hooks: Hooks[]
   existingProviders: Record<string, unknown>
+  configuredProviders?: Record<string, { npm?: string; models?: Record<string, unknown>; name?: string }>
+  catalogProviders?: Record<string, { npm?: string }>
   disabled: Set<string>
   enabled?: Set<string>
   providerNames: Record<string, string | undefined>
@@ -227,6 +239,24 @@ export function resolvePluginProviders(input: {
     if (Object.hasOwn(input.existingProviders, id)) continue
     if (input.disabled.has(id)) continue
     if (input.enabled && !input.enabled.has(id)) continue
+    result.push({
+      id,
+      name: input.providerNames[id] ?? id,
+    })
+  }
+
+  for (const [id, provider] of Object.entries(input.configuredProviders ?? {})) {
+    if (seen.has(id)) continue
+    if (input.disabled.has(id)) continue
+    if (input.enabled && !input.enabled.has(id)) continue
+    const base = ProviderInheritance.inferBaseProviderID({
+      providerID: id,
+      provider,
+      catalog: input.catalogProviders ?? {},
+    })
+    if (!base) continue
+    if (!input.hooks.some((hook) => hook.auth?.provider === base)) continue
+    seen.add(id)
     result.push({
       id,
       name: input.providerNames[id] ?? id,
@@ -380,6 +410,8 @@ export const ProvidersLoginCommand = effectCmd({
     const pluginProviders = resolvePluginProviders({
       hooks,
       existingProviders: providers,
+      configuredProviders: config.provider ?? {},
+      catalogProviders: allProviders,
       disabled,
       enabled,
       providerNames: Object.fromEntries(Object.entries(config.provider ?? {}).map(([id, p]) => [id, p.name])),
@@ -428,7 +460,14 @@ export const ProvidersLoginCommand = effectCmd({
       )
     }
 
-    const plugin = hooks.findLast((x) => x.auth?.provider === provider)
+    const inheritedProvider = config.provider?.[provider]
+      ? ProviderInheritance.inferBaseProviderID({
+          providerID: provider,
+          provider: config.provider[provider],
+          catalog: allProviders,
+        })
+      : undefined
+    const plugin = resolveLoginAuthHook(hooks, provider, inheritedProvider)
     if (plugin && plugin.auth) {
       const handled = yield* handlePluginAuth({ auth: plugin.auth! }, provider, args.method)
       if (handled) return
